@@ -16,6 +16,7 @@ const weather = ref([])
 const plan = ref('')
 const planData = ref(null)  // M3 结构化行程（TripPlan JSON）
 const reviewData = ref(null)  // M3 打磨：Critic 审查报告
+const optimizeData = ref(null)  // M4：VRPTW 优化前后对比
 const threadId = ref('')
 const running = ref(false)
 const activeId = ref('')
@@ -120,6 +121,7 @@ async function send(text) {
   plan.value = ''
   planData.value = null
   reviewData.value = null
+  optimizeData.value = null
   weather.value = []
   routes.value = []
 
@@ -146,6 +148,8 @@ async function send(text) {
           planData.value = data
         } else if (event === 'review') {
           reviewData.value = data
+        } else if (event === 'optimize') {
+          optimizeData.value = data
         } else if (event === 'done') {
           // 收尾
         } else if (event === 'error') {
@@ -466,7 +470,51 @@ function loadDemo() {
     { type: 'tool_result', tool: 'critic_review', content: JSON.stringify({ round: 2, passed: true, issue_count: 1 }), ts: base + 7900 },
     { type: 'tool_call', tool: 'planner_struct', args: { schema: 'TripPlan' }, ts: base + 8000 },
     { type: 'tool_result', tool: 'planner_struct', content: JSON.stringify({ days: 3, items: 12, budget_items: 6, tips: 5 }), ts: base + 9500 },
+    { type: 'tool_call', tool: 'optimizer_route', args: { solver: 'ortools', objective: 'travel_time', time_limit_ms: 2500 }, ts: base + 9600 },
+    { type: 'tool_result', tool: 'optimizer_route', content: JSON.stringify({ applied: true, days: 2, before_min: 268, after_min: 174, saving_pct: 35.1, solve_ms: 2513 }), ts: base + 12100 },
   ]
+
+  // M4 运筹优化对比（demo）
+  // 注意：order_after 与上面 planData 里各天的实际顺序一致（优化结果已回写行程）
+  optimizeData.value = {
+    applied: true,
+    solver: 'ortools-tspTW',
+    solve_ms: 2513,
+    before_min: 228,
+    after_min: 156,
+    before_km: 58.5,
+    after_km: 38.6,
+    saving_pct: 31.6,
+    days: [
+      {
+        date: '2026-09-14',
+        points: 5,
+        applied: true,
+        reordered: true,
+        before_min: 96,
+        after_min: 68,
+        before_km: 26.4,
+        after_km: 18.2,
+        saving_pct: 29.2,
+        order_before: ['成都东站', '酒店', '人民公园鹤鸣茶社', '春熙路/太古里', '蜀大侠火锅'],
+        order_after: ['成都东站', '酒店', '春熙路/太古里', '人民公园鹤鸣茶社', '蜀大侠火锅'],
+      },
+      {
+        date: '2026-09-15',
+        points: 4,
+        applied: true,
+        reordered: true,
+        before_min: 132,
+        after_min: 88,
+        before_km: 32.1,
+        after_km: 20.4,
+        saving_pct: 33.3,
+        order_before: ['犀浦站换乘城际', '都江堰景区', '大熊猫基地', '南桥夜市'],
+        order_after: ['大熊猫基地', '犀浦站换乘城际', '都江堰景区', '南桥夜市'],
+      },
+      { date: '2026-09-16', points: 3, applied: false, reason: '地点不足 4 个，未优化' },
+    ],
+  }
 
   // Critic 审查报告示例（M3 打磨同步版）
   reviewData.value = {
@@ -562,6 +610,7 @@ onBeforeUnmount(() => {
             :plan="plan"
             :plan-data="planData"
             :review="reviewData"
+            :optimize="optimizeData"
             :weather="weather"
             :running="running"
           />

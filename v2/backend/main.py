@@ -30,7 +30,9 @@ from agents import (  # noqa: E402
     build_reviser,
     build_whitelist_checker,
     check_new_places,
+    optimize_plan,
     plan_to_struct,
+    poi_index_from_steps,
     report_brief,
     review_report,
     revise_plan,
@@ -38,7 +40,7 @@ from agents import (  # noqa: E402
 from config import settings  # noqa: E402
 from tools import close_client  # noqa: E402
 
-app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.1.0-m3")
+app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.2.0-m4")
 
 # Critic 审查-修订最大轮数：第 1 轮不通过会修订并复审，第 2 轮结果无论通过与否都放行
 MAX_REVIEW_ROUNDS = 2
@@ -105,6 +107,7 @@ class ChatResponse(BaseModel):
     steps: list[dict[str, Any]] = []
     plan_json: dict[str, Any] | None = None  # M3：结构化行程
     review: dict[str, Any] | None = None  # M3 打磨：Critic 审查报告（含修订轮次）
+    optimize: dict[str, Any] | None = None  # M4：VRPTW 优化前后对比
 
 
 @app.get("/health")
@@ -267,8 +270,9 @@ async def _run_critic_loop(
 async def _run_planner(user_query: str, draft_answer: str) -> tuple[TripPlan | None, list[dict[str, Any]]]:
     """M3 主流程第二棒：把 Researcher 初版 Markdown 转成 TripPlan 结构化对象。
 
-    返回 (TripPlan | None, steps)。结构化输出偶发失败（超时/JSON 截断/校验错），
-    首败后重试一次；两次都失败才返回 (None, error_step)，调用方兜底用原始 Markdown。
+    返回 (TripPlan | None, steps)。结构化输出偶发失败（超时 / JSON 截断 /
+    模型不调工具直接回文本 → 返回 None）都可能发生，因此最多试 3 次：
+    第 1 次正常问，后两次追加"必须调用工具"的强提醒。
     """
     steps: list[dict[str, Any]] = [
         {
@@ -279,9 +283,9 @@ async def _run_planner(user_query: str, draft_answer: str) -> tuple[TripPlan | N
     ]
     planner = get_planner()
     last_err = ""
-    for attempt in range(2):  # 偶发失败重试一次
+    for attempt in range(3):
         try:
-            plan = await plan_to_struct(planner, user_query, draft_answer)
+            plan = await plan_to_struct(planner, user_query, draft_answer, remind=bool(attempt))
             steps.append(
                 {
                     "type": "tool_result",
@@ -301,8 +305,7 @@ async def _run_planner(user_query: str, draft_answer: str) -> tuple[TripPlan | N
             return plan, steps
         except Exception as exc:
             last_err = str(exc)[:200]
-            if attempt == 0:
-                continue  # 重试第二次
+            continue
     steps.append(
         {
             "type": "tool_result",
@@ -311,6 +314,56 @@ async def _run_planner(user_query: str, draft_answer: str) -> tuple[TripPlan | N
         }
     )
     return None, steps
+
+
+async def _run_optimizer(
+    plan: TripPlan, poi_index: dict[str, str] | None = None
+) -> tuple[TripPlan, list[dict[str, Any]], dict[str, Any] | None]:
+    """M4 第三棒：对结构化行程做 VRPTW 重排（OR-Tools），原地改写 plan 的顺序与时间。
+
+    返回 (plan, steps, optimize_dict)。优化是增值功能：
+    - 无解 / 点数不足 / 接口挂了都只记录原因，行程原样放行
+    - optimize_dict 始终返回（含未优化的原因），便于前端如实展示
+    - poi_index 是「地名 → 真实坐标」，来自 Researcher 的高德检索结果，
+      用于修正 Planner 可能编造的坐标
+    """
+    steps: list[dict[str, Any]] = [
+        {
+            "type": "tool_call",
+            "tool": "optimizer_route",
+            "args": {"solver": "ortools", "objective": "travel_time", "time_limit_ms": 2500},
+        }
+    ]
+    try:
+        plan, stat = await optimize_plan(plan, poi_index=poi_index)
+    except Exception as exc:
+        steps.append(
+            {
+                "type": "tool_result",
+                "tool": "optimizer_route",
+                "content": json.dumps({"error": str(exc)[:200]}, ensure_ascii=False),
+            }
+        )
+        return plan, steps, {"applied": False, "reason": f"异常：{exc}"}
+
+    steps.append(
+        {
+            "type": "tool_result",
+            "tool": "optimizer_route",
+            "content": json.dumps(
+                {
+                    "applied": stat.get("applied"),
+                    "days": len([d for d in stat.get("days", []) if d.get("applied")]),
+                    "before_min": stat.get("before_min", 0),
+                    "after_min": stat.get("after_min", 0),
+                    "saving_pct": stat.get("saving_pct", 0),
+                    "solve_ms": stat.get("solve_ms", 0),
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+    return plan, steps, stat
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -333,6 +386,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     answer, steps = _collect_steps(result.get("messages", []))
     plan_json: dict[str, Any] | None = None
     review: dict[str, Any] | None = None
+    optimize: dict[str, Any] | None = None
 
     if answer:
         # Critic 审查 ↔ 修订闭环
@@ -342,6 +396,11 @@ async def chat(req: ChatRequest) -> ChatResponse:
         plan, plan_steps = await _run_planner(req.message, answer)
         steps.extend(plan_steps)
         if plan is not None:
+            # Optimizer：单日最优排序（M4）；坐标用工具轨迹里的真实值兜底
+            plan, opt_steps, optimize = await _run_optimizer(
+                plan, poi_index=poi_index_from_steps(steps)
+            )
+            steps.extend(opt_steps)
             plan_json = plan.model_dump()
             answer = plan.to_markdown()
 
@@ -351,6 +410,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         steps=steps,
         plan_json=plan_json,
         review=review,
+        optimize=optimize,
     )
 
 
@@ -359,9 +419,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     """SSE 流式接口：把 Agent 的每一步实时推给前端。
 
     事件类型：
-        step       —— 工具调用/返回（含 planner_struct）
+        step       —— 工具调用/返回（含 planner_struct / optimizer_route）
         review     —— Critic 审查报告（结构化，前端展示用）
         plan_json  —— 结构化行程对象（前端可用来驱动交互）
+        optimize   —— VRPTW 优化前后对比（里程/耗时/下降百分比）
         token      —— 最终答案的完整 Markdown
         done       —— 结束
         error      —— 出错
@@ -379,6 +440,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         try:
             seen = 0
             answer = ""
+            # 工具结果的副本：SSE 是边收边发的，但坐标体检需要回头翻工具轨迹，
+            # 所以这里必须自己留一份（不能复用非流式分支的 steps 变量）
+            tool_results: list[dict[str, Any]] = []
             async for chunk in agent.astream(
                 {"messages": [HumanMessage(content=req.message)]},
                 config=config,
@@ -399,6 +463,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         if msg.content and not msg.tool_calls:
                             answer = msg.content
                     elif isinstance(msg, ToolMessage):
+                        tool_results.append(
+                            {
+                                "type": "tool_result",
+                                "tool": msg.name,
+                                "content": str(msg.content)[:2000],
+                            }
+                        )
                         yield sse(
                             "step",
                             {
@@ -423,6 +494,14 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 for s in plan_steps:
                     yield sse("step", s)
                 if plan is not None:
+                    # Optimizer：单日最优排序（M4）；坐标用工具轨迹里的真实值兜底
+                    plan, opt_steps, optimize = await _run_optimizer(
+                        plan, poi_index=poi_index_from_steps(tool_results)
+                    )
+                    for s in opt_steps:
+                        yield sse("step", s)
+                    if optimize is not None:
+                        yield sse("optimize", optimize)
                     plan_json = plan.model_dump()
                     answer = plan.to_markdown()
                     yield sse("plan_json", plan_json)
@@ -430,7 +509,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield sse("token", {"content": answer})
             yield sse("done", {"thread_id": req.thread_id})
         except Exception as exc:
-            yield sse("error", {"message": str(exc)})
+            # 带上异常类型：只给 str(exc) 时，像 NameError 这种空描述在界面上是空白，很难排查
+            yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
 
     return StreamingResponse(
         event_gen(),

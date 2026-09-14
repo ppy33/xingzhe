@@ -6,9 +6,21 @@ const props = defineProps({
   plan: { type: String, default: '' },
   planData: { type: Object, default: null },
   review: { type: Object, default: null },
+  optimize: { type: Object, default: null },
   weather: { type: Array, default: () => [] },
   running: { type: Boolean, default: false },
 })
+
+// ---------- M4 优化前后对比 ----------
+const optOpen = ref(true)
+function fmtMin(min) {
+  const m = Math.round(Number(min) || 0)
+  if (m < 60) return `${m} 分钟`
+  const h = Math.floor(m / 60)
+  const r = m % 60
+  return r ? `${h} 小时 ${r} 分` : `${h} 小时`
+}
+const optDays = computed(() => (props.optimize?.days || []).filter((d) => d?.applied))
 
 // ---------- 审查报告 ----------
 const reviewOpen = ref(true)
@@ -174,6 +186,58 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
             </li>
           </ul>
           <p v-else class="rv-none">未发现问题，行程已通过全部 4 项检查（天气 / 预算 / 时间 / 地理）。</p>
+        </div>
+      </div>
+
+      <!-- M4 运筹优化对比卡 -->
+      <div v-if="optimize" class="optimize" :class="{ 'optimize--off': !optimize.applied }">
+        <div class="op-head" @click="optOpen = !optOpen">
+          <span class="op-badge" :class="optimize.applied ? 'op-badge--ok' : 'op-badge--off'">
+            {{ optimize.applied ? '⚡ 路线已优化' : '路线未优化' }}
+          </span>
+          <span v-if="optimize.applied" class="op-saving">省 {{ optimize.saving_pct }}%</span>
+          <span v-if="optimize.applied" class="op-solver">
+            {{ optimize.solver }} · {{ optimize.solve_ms }}ms
+          </span>
+          <span class="op-caret" :class="{ open: optOpen }">›</span>
+        </div>
+        <div v-if="optOpen" class="op-body">
+          <template v-if="optimize.applied">
+            <div class="op-metrics">
+              <div class="op-metric">
+                <span class="op-k">总耗时</span>
+                <span class="op-v">
+                  <s>{{ fmtMin(optimize.before_min) }}</s>
+                  <i>→</i>
+                  <b>{{ fmtMin(optimize.after_min) }}</b>
+                </span>
+              </div>
+              <div class="op-metric">
+                <span class="op-k">总里程</span>
+                <span class="op-v">
+                  <s>{{ optimize.before_km }} km</s>
+                  <i>→</i>
+                  <b>{{ optimize.after_km }} km</b>
+                </span>
+              </div>
+            </div>
+            <ul class="op-days">
+              <li v-for="(d, i) in optDays" :key="i" class="op-day">
+                <span class="op-date">{{ d.date }}</span>
+                <span class="op-points">{{ d.points }} 个点</span>
+                <span class="op-delta">−{{ d.saving_pct }}%</span>
+                <span class="op-flow">
+                  {{ (d.order_before || []).join(' → ') }}
+                  <i>⇒</i>
+                  {{ (d.order_after || []).join(' → ') }}
+                </span>
+              </li>
+            </ul>
+            <p class="op-note">
+              按营业时间窗 + 通行耗时求解最短路线（不增删地点，只调整先后顺序）
+            </p>
+          </template>
+          <p v-else class="op-none">{{ optimize.reason || '当前行程不满足优化条件' }}</p>
         </div>
       </div>
 
@@ -451,6 +515,114 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
 .rv-sev[data-sev="low"]    { color: #67e8f9; background: rgba(103,232,249,0.11); }
 .rv-desc { color: var(--text-2); line-height: 1.6; flex: 1; min-width: 0; }
 .rv-none {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ---------- M4 运筹优化对比卡 ---------- */
+.optimize {
+  margin-bottom: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.06);
+  overflow: hidden;
+}
+.optimize--off {
+  border-color: var(--line, #2a2a2a);
+  background: transparent;
+}
+.op-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.op-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.op-badge--ok { background: rgba(56, 189, 248, 0.18); color: #38bdf8; }
+.op-badge--off { background: rgba(148, 163, 184, 0.15); color: var(--muted); }
+.op-saving {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4ade80;
+}
+.op-solver {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.op-caret {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.18s;
+  font-size: 15px;
+}
+.op-caret.open { transform: rotate(90deg); }
+.op-body { padding: 0 11px 10px; }
+.op-metrics {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.op-metric {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.op-k {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.op-v {
+  font-size: 12px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.op-v s { color: var(--muted); font-size: 11px; }
+.op-v i { color: var(--muted); font-style: normal; font-size: 10px; }
+.op-v b { color: #38bdf8; font-size: 13px; }
+.op-days {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.op-day {
+  display: grid;
+  grid-template-columns: auto auto auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid rgba(56, 189, 248, 0.5);
+}
+.op-date { color: var(--text-2, #bbb); font-variant-numeric: tabular-nums; }
+.op-points { color: var(--muted); }
+.op-delta { color: #4ade80; font-weight: 600; }
+.op-flow { color: var(--muted); line-height: 1.6; }
+.op-flow i { font-style: normal; color: #38bdf8; margin: 0 2px; }
+.op-note {
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.op-none {
   margin: 0;
   font-size: 11.5px;
   color: var(--muted);

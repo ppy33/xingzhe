@@ -8,6 +8,7 @@ from agents.critic import (
     review_report,
     revise_plan,
 )
+from agents.optimizer import optimize_plan, poi_index_from_steps
 from agents.planner import build_planner, plan_to_struct
 from agents.researcher import build_researcher
 from agents.schemas import ReviewIssue, ReviewReport, TripPlan, WhitelistCheck
@@ -23,6 +24,8 @@ __all__ = [
     "report_brief",
     "build_planner",
     "plan_to_struct",
+    "optimize_plan",
+    "poi_index_from_steps",
     "TripPlan",
     "ReviewReport",
     "ReviewIssue",

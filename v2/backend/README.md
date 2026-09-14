@@ -109,6 +109,19 @@ v2/backend/
 {
   "thread_id": "abc123",
   "answer": "### 行程概览 ...",
+  "plan_json": {"title": "...", "days": [...], "budget": [...]},
+  "review": {"passed": true, "rounds": 2, "revisions": 1, "issues": [...]},
+  "optimize": {
+    "applied": true, "solver": "ortools-tspTW", "solve_ms": 4632,
+    "before_min": 80.9, "after_min": 72.5, "saving_pct": 10.3,
+    "before_km": 9.0, "after_km": 8.0,
+    "days": [
+      {"date": "2026-09-14", "points": 7, "applied": true, "mode": "strict",
+       "order_before": ["武侯祠", "锦里", "..."], "order_after": ["武侯祠", "锦里小吃街", "..."],
+       "saving_pct": 10.3,
+       "geo": {"city": "成都市", "from_tools": ["武侯祠", "锦里"], "regenerated": [], "outliers": []}}
+    ]
+  },
   "steps": [
     {"type": "tool_call",   "tool": "poi_search", "args": {"keywords": "宽窄巷子", "city": "成都"}},
     {"type": "tool_result", "tool": "poi_search", "content": "{\"count\":3,...}"}
@@ -128,10 +141,15 @@ event: step       data: {"type": "tool_call", "tool": "weather_forecast", "args"
 event: step       data: {"type": "tool_result", "tool": "weather_forecast", "content": "..."}
 event: review     data: {"passed": true, "issue_count": 5, "rounds": 2, "revisions": 1, "new_places": []}
 event: plan_json  data: {"title": "...", "days": [...], "budget": [...]}
+event: optimize   data: {"applied": true, "before_min": 80.9, "after_min": 72.5, "saving_pct": 10.3, "days": [...]}
 event: token      data: {"content": "### 行程概览 ..."}
 event: done       data: {"thread_id": "..."}
 event: error      data: {"message": "..."}
 ```
+
+事件顺序：`start` → 若干 `step`（Researcher 工具）→ 若干 `step`（critic_review / revise_plan）
+→ `review` → `step`（planner_struct）→ `step`（optimizer_route）→ `optimize` → `plan_json`
+→ `token` → `done`。
 
 ---
 
@@ -146,9 +164,11 @@ Reviser（按问题清单修订 Markdown，不调工具）
    ↓
 Critic 复审（最多 MAX_REVIEW_ROUNDS=2 轮，第 2 轮无论通过与否都放行）
    ↓
-Planner（结构化输出 TripPlan，失败自动重试一次）
+Planner（结构化输出 TripPlan，失败自动重试最多 3 次，后两次带强提醒）
    ↓
-Markdown + plan_json + review 三路输出
+Optimizer（OR-Tools VRPTW 单日最优排序 + 坐标体检，M4）
+   ↓
+Markdown + plan_json + review + optimize 四路输出
 ```
 
 ### 抗幻觉：修订内容的地点白名单
@@ -170,7 +190,59 @@ Reviser 只允许「调序 / 删减 / 重分配时间」，不允许引入初版
   必须 `extra_body={"thinking": {"type": "disabled"}}`
 - Critic 的判定规则要写成「**只要存在任一 high 问题，passed 必须为 false**」；
   原措辞「只存在 high 时 passed=false」有歧义，模型会带 high 问题放行
-- Planner 结构化输出偶发失败（超时/JSON 截断），已在 `_run_planner` 内加一次重试
+- Planner 结构化输出偶发失败：**根因是模型有时不调工具、直接回自然语言**，
+  LangChain 的 `with_structured_output` 此时返回 `None`（不是抛异常），
+  原先会炸成 `'NoneType' object has no attribute 'days'`。
+  现在 `plan_to_struct` 显式校验 + 最多重试 3 次（后两次追加「必须调用工具」强提醒）
+
+---
+
+## M4 运筹优化（OR-Tools）
+
+单日行程的**带时间窗最短路**（TSPTW）：给定当天一组 POI（含坐标、营业时间、停留时长），
+求从当天首个地点出发、把所有点走完、且不撞闭馆的最短顺序。
+
+### 实现要点
+
+| 环节 | 做法 |
+|---|---|
+| 时间矩阵 | 高德 `/v3/distance` 批量接口：一次传多个 origin，n 个点只需 **n 次调用**（而非 n²-n） |
+| 限流 | 复用 `tools/amap.py` 的 `_amap_get`（串行锁 + 0.4s 间隔 + 超限退避），实测无 10021 |
+| 矩阵缓存 | 进程内 `(origin, dest) → (分钟, 公里)`，同一天多次求解 / 多次请求不重复打接口 |
+| 建模 | OR-Tools routing，单车辆 + `Time` 维度（时间窗 + 停留时长）+ 弧成本 = 通行耗时 |
+| 求解 | `PATH_CHEAPEST_ARC` 首解 → `GUIDED_LOCAL_SEARCH`，限时 **2.5 秒**（`FromMilliseconds`，`FromSeconds` 只吃整数） |
+| 线程 | OR-Tools 是阻塞的 C++ 调用，必须 `asyncio.to_thread`，否则卡死事件循环 |
+| 失败降级 | 三级：严格（到达+停留 ≤ 关门）→ 宽松（只要求到达 ≤ 关门）→ 压缩停留时长排序（不回写），全失败才保原顺序 |
+
+### 关键：坐标体检（不修会直接让优化失效）
+
+实测 Planner 会把坐标**编造**出来：锦里被写到河北邢台、宽窄巷子写到北京顺义、
+人民公园写到承德——5 个点里 4 个是假的。脏坐标会让距离矩阵彻底失真（武侯祠→锦里算出 1020 分钟），
+路线优化必然无解，前端地图也会标到别的省。
+
+修复思路是**用权威数据源覆盖 LLM 坐标**，取信顺序：
+
+1. **工具轨迹里的真实坐标**（`poi_index_from_steps`）：Researcher 调高德 POI 检索拿到的原始值，
+   零额外接口开销，命中率最高（实测 7 个点中有 6 个直接从轨迹取回）
+2. **按地点名重新检索**（带城市限定，避免重名地点查错）
+3. 行程里原有的坐标：只在「有可靠参照且同城」时才保留
+
+两个踩过的坑：
+
+- 工具结果返回前端时会被截断到 2000 字符，**截断后的 JSON 解析必然失败** →
+  用正则抠 `"name"…"location"` 对，不依赖完整 JSON
+- **绝不能用行程里的坐标投票推城市**：坏点占多数时会凑出一个「假城市簇」
+  （实测推出「廊坊市」），反而把好坐标全改坏。没有权威参照时就只补空坐标、不乱动已有坐标
+
+### 坐标来源（最终形态）
+
+```
+Researcher 高德检索（真实坐标，权威）
+   ↓ 工具轨迹 steps
+Optimizer 坐标体检 → 覆盖 Planner 可能编造的坐标
+   ↓
+plan_json（前端地图）+ 距离矩阵（优化器）
+```
 
 ---
 
@@ -190,13 +262,15 @@ Agent 自主完成了：
 
 ---
 
-## M1 已知限制（M2/M3 要解决）
+## 已知限制与里程碑对应
 
-| 限制 | 计划 |
+| 限制 | 状态 |
 |---|---|
-| 行程只是 Markdown 文本，没有结构化 JSON | ✅ M3 已解决：Planner 输出 TripPlan |
-| 前端拿不到真实流式 token | M2 改 `stream_mode="messages"` |
-| 单 Agent 串行跑 20+ 次工具，耗时约 100 秒 | 部分改善：Critic 用 flash，可进一步并行/缓存 |
-| 没有 Critic 审查（行程合理性/疲劳度） | ✅ M3 已解决：Critic ↔ Reviser 闭环 + 前端审查卡 |
-| 记忆只在内存，重启丢失 | M2 换 SQLite checkpointer（未做） |
-| 无埋点统计（turns/latency/cost） | M5 加可观测性 |
+| 行程只是 Markdown 文本，没有结构化 JSON | ✅ M3：Planner 输出 TripPlan |
+| 前端拿不到真实流式 token | 未做（当前一次性推完整 Markdown） |
+| 单 Agent 串行跑 20+ 次工具，耗时约 100 秒 | 🟡 部分改善（Critic 用 flash、矩阵缓存），仍是最主要的耗时来源 |
+| 没有 Critic 审查（行程合理性/疲劳度） | ✅ M3：Critic ↔ Reviser 闭环 + 前端审查卡 |
+| 单日顺序靠 LLM 拍脑袋 | ✅ M4：OR-Tools VRPTW 最优排序 + 前后对比 |
+| 地点坐标可能被 LLM 编造 | ✅ M4：坐标体检（工具轨迹为权威源） |
+| 记忆只在内存，重启丢失 | M5 换 SQLite checkpointer |
+| 无埋点统计（turns/latency/cost） | M6 加可观测性 |

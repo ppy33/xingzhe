@@ -67,6 +67,10 @@ jobs:
         working-directory: v2/backend
         run: python -c "import main; print('import ok:', main.app.title, main.app.version)"
 
+      - name: 离线回归（优化器：合成矩阵 + 假地图数据，不联网不烧配额）
+        working-directory: v2/backend
+        run: python test_optimizer.py
+
   frontend:
     name: 前端构建
     runs-on: ubuntu-latest

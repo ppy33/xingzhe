@@ -6,3 +6,4 @@ python-dotenv>=1.0
 langgraph>=1.0
 langchain-core>=1.0
 langchain-openai>=1.0
+ortools>=9.10

@@ -58,6 +58,7 @@ const TOOL_LABEL = {
   critic_review: 'Critic 审查',
   revise_plan: '行程修订',
   planner_struct: '结构化规划',
+  optimizer_route: '路线优化',
 }
 
 function label(tool) {
