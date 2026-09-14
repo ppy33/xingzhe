@@ -1,0 +1,11 @@
+.env
+.env.local
+data/
+__pycache__/
+*.pyc
+*.log
+server.log
+*.db
+*.db-wal
+*.db-shm
+.git
