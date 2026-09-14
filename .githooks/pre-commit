@@ -1,0 +1,60 @@
+#!/bin/sh
+# 提交前拦截密钥泄漏。
+# 启用方式（每人本地执行一次）：git config core.hooksPath .githooks
+#
+# 只扫「暂存区」里将要提交的内容，命中就中断提交。
+# 注意：本文件刻意不写任何真实密钥值——否则扫描器自己就成了泄漏源。
+# 下列均为「形态特征」匹配，不含真实值。
+
+SKIP_EXT='png|jpg|jpeg|gif|ico|pdf|woff|woff2'
+
+scan_env_assign() {
+  grep -qIE '^[[:space:]]*(AMAP_SERVER_KEY|AMAP_JSAPI_KEY|AMAP_JSAPI_SECRET|DEEPSEEK_API_KEY)[[:space:]]*=[[:space:]]*[A-Za-z0-9_-]{8,}' "$1"
+}
+scan_sk_key() {
+  grep -qIE 'sk-[A-Za-z0-9]{20,}' "$1"
+}
+scan_amap_shape() {
+  grep -qIE '\b[0-9a-f]{32}\b' "$1"
+}
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$STAGED" ] && exit 0
+
+FAIL=0
+
+for f in $STAGED; do
+  case "$f" in
+    *.env.example|.env.example) continue ;;
+    ./.env.example) continue ;;
+  esac
+  echo "$f" | grep -qE "$SKIP_EXT$" && continue
+  [ -f "$f" ] || continue
+
+  if scan_sk_key "$f"; then
+    echo "✗ 疑似 API Key（sk- 开头）：$f"
+    FAIL=1
+  fi
+
+  case "$f" in
+    *.md|*.py|*.vue|*.js|*.ts|*.json|*.yml|*.yaml|*.txt|*.sh|*.ini|*.toml)
+      if scan_env_assign "$f"; then
+        echo "✗ 疑似真实密钥被写进文件：$f"
+        FAIL=1
+      fi
+      if scan_amap_shape "$f"; then
+        echo "✗ 疑似高德 Key（32 位十六进制串）：$f"
+        FAIL=1
+      fi
+      ;;
+  esac
+done
+
+if [ "$FAIL" -eq 1 ]; then
+  echo ""
+  echo "提交已中断。真实密钥只能放在本地 .env / .env.local（两者已在 .gitignore 中）。"
+  echo "如果确认是误报，可用 git commit --no-verify 跳过（请谨慎）。"
+  exit 1
+fi
+
+exit 0
