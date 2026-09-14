@@ -6,7 +6,8 @@ import MapView from './components/MapView.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import AgentTrace from './components/AgentTrace.vue'
 import MetricsPanel from './components/MetricsPanel.vue'
-import { chatStream, health, tripCheckStream, fetchMetrics } from './api/client.js'
+import SettingsPanel from './components/SettingsPanel.vue'
+import { chatStream, health, tripCheckStream, fetchMetrics, getLlmConfig, setLlmConfig } from './api/client.js'
 
 // ---------- 状态 ----------
 const messages = ref([])
@@ -31,6 +32,10 @@ const finishedAt = ref(0)
 const now = ref(0)
 const metrics = ref({ summary: null, recent: [] })  // M6：埋点观测
 const metricsLoading = ref(false)  // M6：埋点刷新中
+const demoMode = ref(false)  // 演示模式（零密钥体验）
+const settingsOpen = ref(false)  // 模型设置面板
+const llmConfig = ref({ base_url: '', model: '', model_fast: '' })  // 当前 LLM 配置
+const llmSaving = ref(false)  // 配置保存中
 
 let controller = null
 let ticker = null
@@ -265,6 +270,42 @@ async function loadMetrics() {
     metrics.value = { summary: null, recent: [] }
   } finally {
     metricsLoading.value = false
+  }
+}
+
+// ---------- 模型自定义 + 演示模式 ----------
+async function loadLlmConfig() {
+  try {
+    llmConfig.value = await getLlmConfig()
+  } catch {
+    llmConfig.value = { base_url: '', model: '', model_fast: '' }
+  }
+}
+
+async function saveLlmConfig(payload) {
+  llmSaving.value = true
+  try {
+    await setLlmConfig(payload)
+    settingsOpen.value = false
+    await loadLlmConfig()
+    // 刷新 health 显示当前模型
+    try {
+      const h = await health()
+      status.value = { ok: h.status === 'ok', model: h.model }
+    } catch { /* 忽略 */ }
+  } catch (e) {
+    alert(`保存失败：${e.message}`)
+  } finally {
+    llmSaving.value = false
+  }
+}
+
+function toggleDemo() {
+  demoMode.value = !demoMode.value
+  if (demoMode.value) {
+    loadDemo()
+  } else {
+    window.location.reload()
   }
 }
 
@@ -608,9 +649,11 @@ function loadDemo() {
 
 // ---------- 初始化 ----------
 onMounted(async () => {
-  if (new URLSearchParams(window.location.search).has('demo')) {
+  demoMode.value = new URLSearchParams(window.location.search).has('demo')
+  if (demoMode.value) {
     loadDemo()
   }
+  loadLlmConfig()
   try {
     const h = await health()
     status.value = { ok: h.status === 'ok', model: h.model }
@@ -627,7 +670,21 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app">
-    <AppHeader :status="status" :stats="stats" />
+    <AppHeader
+      :status="status"
+      :stats="stats"
+      :demo="demoMode"
+      @open-settings="settingsOpen = true"
+      @toggle-demo="toggleDemo"
+    />
+
+    <SettingsPanel
+      :open="settingsOpen"
+      :current="llmConfig"
+      :saving="llmSaving"
+      @close="settingsOpen = false"
+      @save="saveLlmConfig"
+    />
 
     <main class="body">
       <ChatPanel

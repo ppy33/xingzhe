@@ -6,11 +6,10 @@ M3 会在此基础上拆出 Planner / Critic / Optimizer 三个 Agent。
 from __future__ import annotations
 
 from langchain_core.messages import SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import create_react_agent
 
-from config import settings
+from config import build_llm
 from tools import AMAP_TOOLS
 
 SYSTEM_PROMPT = """你是「行者」，一个专业的中文旅游行程规划助手。
@@ -79,15 +78,7 @@ def build_researcher(model: str | None = None, temperature: float = 0.3, checkpo
         checkpointer: 会话记忆后端。传 None 用内存（重启丢），
             M5 会传 AsyncSqliteSaver 让同一 thread_id 在重启后仍能继续追问。
     """
-    settings.require_llm()
-    llm = ChatOpenAI(
-        model=model or settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        timeout=120,
-        max_retries=2,
-    )
+    llm = build_llm(model=model, temperature=temperature, timeout=120)
     return create_react_agent(
         model=llm,
         tools=AMAP_TOOLS,

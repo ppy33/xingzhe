@@ -53,7 +53,7 @@ from agents import (  # noqa: E402
     review_report,
     revise_plan,
 )
-from config import settings  # noqa: E402
+from config import build_llm, get_llm_override, llm_config, set_llm_override, settings  # noqa: E402
 from tools import close_client  # noqa: E402
 
 _agent = None
@@ -79,6 +79,16 @@ async def lifespan(app: FastAPI):
     global _checkpointer, _saver_cm
     path = storage.init_db(settings.db_path)
     print(f"[storage] 行程库就绪：{path}")
+    # 加载前端保存的自定义 LLM 配置（模型自定义功能）
+    try:
+        saved = storage.get_setting("llm_override")
+        if saved:
+            import json as _json
+
+            set_llm_override(_json.loads(saved))
+            print("[llm] 已加载自定义 LLM 配置")
+    except Exception as exc:
+        print(f"[llm] 加载自定义配置失败（用 .env 默认）：{exc}")
     try:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -96,7 +106,7 @@ async def lifespan(app: FastAPI):
     await close_client()
 
 
-app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.4.0-m6", lifespan=lifespan)
+app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.5.0", lifespan=lifespan)
 
 # Critic 审查-修订最大轮数：第 1 轮不通过会修订并复审，第 2 轮结果无论通过与否都放行
 MAX_REVIEW_ROUNDS = 2
@@ -161,11 +171,64 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    cfg = llm_config()
     return {
         "status": "ok",
         "amap_key_configured": bool(settings.amap_server_key),
-        "llm_configured": bool(settings.deepseek_api_key),
-        "model": settings.deepseek_model,
+        "llm_configured": bool(cfg["api_key"]),
+        "model": cfg["model"],
+    }
+
+
+class LmConfigRequest(BaseModel):
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    model_fast: str = ""
+
+
+def _mask_key(key: str) -> str:
+    """脱敏展示 api_key：只留前 4 后 4，中间打码。"""
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:4]}****{key[-4:]}"
+
+
+@app.get("/api/llm-config")
+async def get_llm_config() -> dict[str, Any]:
+    """返回当前生效的 LLM 配置（api_key 脱敏）+ 是否来自前端覆盖。"""
+    cfg = llm_config()
+    override = get_llm_override()
+    return {
+        "api_key": _mask_key(cfg["api_key"]) if cfg["api_key"] else "",
+        "base_url": cfg["base_url"],
+        "model": cfg["model"],
+        "model_fast": cfg["model_fast"],
+        "has_key": bool(cfg["api_key"]),
+        "customized": bool(override),
+    }
+
+
+@app.post("/api/llm-config")
+async def set_llm_config(req: LmConfigRequest) -> dict[str, Any]:
+    """保存前端自定义的 LLM 配置（api_key/base_url/model/model_fast）。空值回落到 .env 默认。"""
+    payload = {
+        "api_key": req.api_key.strip(),
+        "base_url": req.base_url.strip(),
+        "model": req.model.strip(),
+        "model_fast": req.model_fast.strip(),
+    }
+    cfg = set_llm_override(payload)
+    # 持久化到 SQLite（重启不丢）
+    try:
+        storage.set_setting("llm_override", json.dumps(payload, ensure_ascii=False))
+    except Exception as exc:
+        print(f"[llm] 配置持久化失败（仅本次生效）：{exc}")
+    return {
+        "ok": True,
+        "has_key": bool(cfg["api_key"]),
+        "model": cfg["model"],
+        "model_fast": cfg["model_fast"],
     }
 
 

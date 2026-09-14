@@ -15,11 +15,10 @@
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
 from agents.schemas import ReviewReport, WhitelistCheck
-from config import settings
+from config import build_llm
 
 CRITIC_SYSTEM_PROMPT = """你是「行者」系统的 Critic（审查官）。Researcher 已生成一份初版行程 Markdown，你的任务是**审查**它并输出结构化审查报告。
 
@@ -70,16 +69,7 @@ WHITELIST_CHECK_PROMPT = """你是行程修订的审计员。Reviser 被要求�
 
 def build_whitelist_checker(model: str | None = None):
     """构造白名单核验器：flash + WhitelistCheck 结构化输出。"""
-    settings.require_llm()
-    llm = ChatOpenAI(
-        model=model or settings.deepseek_model_fast,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=0,
-        timeout=60,
-        max_retries=2,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    llm = build_llm(model=model, fast=True, temperature=0, timeout=60)
     return llm.with_structured_output(WhitelistCheck, method="function_calling")
 
 
@@ -103,31 +93,13 @@ async def check_new_places(llm, original: str, revised: str) -> list[str]:
 
 def build_critic(model: str | None = None, temperature: float = 0.1):
     """构造 Critic：绑定 ReviewReport 结构化输出的 flash。"""
-    settings.require_llm()
-    llm = ChatOpenAI(
-        model=model or settings.deepseek_model_fast,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        timeout=90,
-        max_retries=2,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    llm = build_llm(model=model, fast=True, temperature=temperature, timeout=90)
     return llm.with_structured_output(ReviewReport, method="function_calling")
 
 
 def build_reviser(model: str | None = None, temperature: float = 0.2):
     """构造 Reviser：主模型 pro，纯文本输出（不调工具不结构化）。"""
-    settings.require_llm()
-    return ChatOpenAI(
-        model=model or settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        timeout=120,
-        max_retries=2,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    return build_llm(model=model, temperature=temperature, timeout=120)
 
 
 async def review_report(llm, user_query: str, draft_answer: str) -> ReviewReport:

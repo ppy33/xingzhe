@@ -14,10 +14,9 @@
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from agents.schemas import TripPlan
-from config import settings
+from config import build_llm
 
 PLANNER_SYSTEM_PROMPT = """你是「行者」系统的 Planner（结构化规划官）。
 Researcher 已通过工具拿到了景点、天气、交通等真实数据，并产出了一份 Markdown 初版行程。
@@ -50,16 +49,7 @@ def build_planner(model: str | None = None, temperature: float = 0.1):
       thinking 模式不支持 function_calling / tool_choice（`Thinking mode does not
       support this tool_choice`），必须通过 `extra_body` 关掉才能让结构化工具调用跑通。
     """
-    settings.require_llm()
-    llm = ChatOpenAI(
-        model=model or settings.deepseek_model,  # 默认用主力模型 pro
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        timeout=90,
-        max_retries=2,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    llm = build_llm(model=model, temperature=temperature, timeout=90)
     return llm.with_structured_output(TripPlan, method="function_calling")
 
 

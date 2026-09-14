@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS metrics (
 
 CREATE INDEX IF NOT EXISTS idx_metrics_thread ON metrics(thread_id, id);
 CREATE INDEX IF NOT EXISTS idx_metrics_created ON metrics(created_at);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -230,6 +235,27 @@ def list_metrics(limit: int = 50) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_setting(key: str) -> str | None:
+    """读取一个应用设置（如 llm_override）。不存在返回 None。"""
+    with _LOCK:
+        row = _conn().execute(
+            "SELECT value FROM app_settings WHERE key=?", (key,)
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    """写入/覆盖一个应用设置。"""
+    with _LOCK:
+        conn = _conn()
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        conn.commit()
+
+
 def summary_metrics() -> dict[str, Any]:
     """汇总统计：请求数 / 平均耗时 / 工具调用均值 / token 总量 / 成功率。"""
     with _LOCK:
@@ -270,4 +296,6 @@ __all__ = [
     "log_metric",
     "list_metrics",
     "summary_metrics",
+    "get_setting",
+    "set_setting",
 ]

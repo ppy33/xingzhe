@@ -18,7 +18,6 @@ from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from agents.optimizer import (
     guess_city,
@@ -28,7 +27,7 @@ from agents.optimizer import (
     regeo_city,
 )
 from agents.schemas import PlanChange, TripInspection, TripIssue, TripPlan
-from config import settings
+from config import build_llm
 from tools import poi_search
 from tools.amap import _amap_get
 
@@ -315,16 +314,7 @@ async def infer_city(plan: TripPlan, fallback: str = "") -> str:
 
 def build_fixer(model: str | None = None, temperature: float = 0.2):
     """构造修复官：主模型 + TripPlan 结构化输出。"""
-    settings.require_llm()
-    llm = ChatOpenAI(
-        model=model or settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        timeout=120,
-        max_retries=2,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    llm = build_llm(model=model, temperature=temperature, timeout=120)
     return llm.with_structured_output(TripPlan, method="function_calling")
 
 

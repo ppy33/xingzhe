@@ -2,7 +2,9 @@
 defineProps({
   status: { type: Object, required: true },
   stats: { type: Object, required: true },
+  demo: { type: Boolean, default: false },
 })
+const emit = defineEmits(['open-settings', 'toggle-demo'])
 </script>
 
 <template>
@@ -37,6 +39,13 @@ defineProps({
     <div class="conn">
       <span class="dot" :class="status.ok ? 'on' : 'off'" />
       <span>{{ status.ok ? '后端已连接' : '后端未连接' }}</span>
+    </div>
+
+    <div class="btns">
+      <button class="hbtn" :class="{ on: demo }" @click="emit('toggle-demo')">
+        {{ demo ? '退出演示' : '演示模式' }}
+      </button>
+      <button class="hbtn" @click="emit('open-settings')">模型设置</button>
     </div>
   </header>
 </template>
@@ -137,6 +146,27 @@ defineProps({
 .dot.off {
   background: var(--danger);
   box-shadow: 0 0 9px var(--danger);
+}
+
+.btns {
+  display: flex;
+  gap: 8px;
+}
+.hbtn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+.hbtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.hbtn.on {
+  color: #4fe0bf;
+  border-color: var(--teal);
 }
 
 @media (max-width: 1180px) {

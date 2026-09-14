@@ -91,10 +91,15 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8000
 cd v2/frontend
 cp .env.example .env.local  # 填 VITE_AMAP_JSAPI_KEY + VITE_AMAP_SECURITY_CODE
 npm install && npm run dev  # http://127.0.0.1:5173
-
-# 3. 离线演示（不需要任何密钥，看 UI）
-# 浏览器打开 http://127.0.0.1:5173/?demo=1
 ```
+
+### 零密钥体验（最快看效果）
+
+不配任何密钥也能跑：启动前端后，点右上角 **「演示模式」** 按钮（或访问 `?demo=1`），内置完整演示数据，不联网不烧配额。
+
+### 模型自定义（接入你自己的 API）
+
+不满足于默认 DeepSeek？点右上角 **「模型设置」**，填入你自己的 **API Key / Base URL / 模型名** 即可接入任意 OpenAI 兼容模型（OpenAI / 智谱 / Moonshot 等），保存即生效、重启不丢。空值自动回落 `.env` 默认。
 
 详细步骤（含密钥获取、踩坑速查）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 

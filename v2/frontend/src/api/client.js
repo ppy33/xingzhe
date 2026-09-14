@@ -110,3 +110,21 @@ export async function fetchMetrics(limit = 50) {
   if (!res.ok) throw new Error(`metrics ${res.status}`)
   return res.json()
 }
+
+/** 读取当前 LLM 配置（api_key 脱敏） */
+export async function getLlmConfig() {
+  const res = await fetch(`${BASE}/api/llm-config`)
+  if (!res.ok) throw new Error(`llm-config ${res.status}`)
+  return res.json()
+}
+
+/** 保存自定义 LLM 配置（api_key/base_url/model/model_fast，空值回落默认） */
+export async function setLlmConfig(payload) {
+  const res = await fetch(`${BASE}/api/llm-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(`llm-config ${res.status}`)
+  return res.json()
+}
