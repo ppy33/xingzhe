@@ -41,6 +41,22 @@ CREATE TABLE IF NOT EXISTS trip_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_thread ON trip_events(thread_id, id);
+
+CREATE TABLE IF NOT EXISTS metrics (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id     TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'chat',
+    status        TEXT NOT NULL DEFAULT 'ok',
+    total_ms      INTEGER NOT NULL DEFAULT 0,
+    tool_calls    INTEGER NOT NULL DEFAULT 0,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    stages        TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_metrics_thread ON metrics(thread_id, id);
+CREATE INDEX IF NOT EXISTS idx_metrics_created ON metrics(created_at);
 """
 
 
@@ -162,6 +178,87 @@ def list_events(thread_id: str, limit: int = 20) -> list[dict[str, Any]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# M6 埋点：每次请求的可观测指标（耗时 / 工具数 / token / 各环节耗时）
+# ---------------------------------------------------------------------------
+
+def log_metric(
+    thread_id: str,
+    *,
+    kind: str = "chat",
+    status: str = "ok",
+    total_ms: int = 0,
+    tool_calls: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    stages: dict[str, int] | None = None,
+) -> None:
+    """写入一条请求埋点。stages 是各环节耗时（毫秒），如 {"researcher": 1200, "critic": 800}。"""
+    with _LOCK:
+        conn = _conn()
+        conn.execute(
+            """
+            INSERT INTO metrics
+                (thread_id, kind, status, total_ms, tool_calls,
+                 input_tokens, output_tokens, stages, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                thread_id,
+                kind,
+                status,
+                int(total_ms),
+                int(tool_calls),
+                int(input_tokens),
+                int(output_tokens),
+                json.dumps(stages or {}, ensure_ascii=False),
+                _now(),
+            ),
+        )
+        conn.commit()
+
+
+def list_metrics(limit: int = 50) -> list[dict[str, Any]]:
+    """最近的埋点明细（不含 stages，供前端列表）。"""
+    with _LOCK:
+        rows = _conn().execute(
+            "SELECT thread_id, kind, status, total_ms, tool_calls, "
+            "input_tokens, output_tokens, created_at "
+            "FROM metrics ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def summary_metrics() -> dict[str, Any]:
+    """汇总统计：请求数 / 平均耗时 / 工具调用均值 / token 总量 / 成功率。"""
+    with _LOCK:
+        row = _conn().execute(
+            """
+            SELECT
+                COUNT(*)                          AS requests,
+                COALESCE(AVG(total_ms), 0)        AS avg_ms,
+                COALESCE(AVG(tool_calls), 0)      AS avg_tools,
+                COALESCE(SUM(input_tokens), 0)    AS sum_in,
+                COALESCE(SUM(output_tokens), 0)   AS sum_out,
+                SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_count
+            FROM metrics
+            """
+        ).fetchone()
+    d = dict(row)
+    total = d["requests"] or 0
+    ok = d["ok_count"] or 0
+    return {
+        "requests": total,
+        "ok_count": ok,
+        "fail_count": total - ok,
+        "avg_ms": round(d["avg_ms"] or 0),
+        "avg_tools": round(d["avg_tools"] or 0, 1),
+        "sum_input_tokens": d["sum_in"] or 0,
+        "sum_output_tokens": d["sum_out"] or 0,
+    }
+
+
 __all__ = [
     "init_db",
     "close_db",
@@ -170,4 +267,7 @@ __all__ = [
     "list_trips",
     "add_event",
     "list_events",
+    "log_metric",
+    "list_metrics",
+    "summary_metrics",
 ]

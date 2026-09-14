@@ -287,6 +287,27 @@ plan_json（前端地图）+ 距离矩阵（优化器）
 
 ---
 
+## M6 可观测与评估
+
+### 埋点（metrics 表）
+
+每次 `/api/chat` 与 `/api/trip/check` 请求自动记录到 `metrics` 表：
+总耗时、工具调用数、token 用量（从 `AIMessage.usage_metadata` 提取）、各环节耗时（researcher/critic/planner/optimizer）。
+
+- `storage.log_metric()/list_metrics()/summary_metrics()`：写入/读取/汇总
+- `GET /api/metrics`：返回 `summary`（请求数/平均耗时/平均工具数/token 总量）+ `recent` 明细
+- 前端「观测」tab：汇总卡片 + 明细列表，对话结束后自动刷新
+
+### 场景回归套件
+
+`scenarios/scenarios.yaml` 定义场景，`run_eval.py` 一键跑分，产出 `docs/eval_report.md`。
+指标：场景通过率、平均端到端耗时、平均工具调用数、结构化行程产出率、Critic 硬伤拦截率、路线优化生效率。
+
+- 评估请求写入独立库 `data/eval.db`，不污染真实数据
+- 会消耗 LLM + 高德配额，手动触发，不进 CI（离线回归 `test_*.py` 已进 CI）
+
+---
+
 ## 已验证效果
 
 输入：`从上海出发，9月14日到成都玩3天，两个人，总预算3000元，喜欢美食和人文，住经济型酒店`
@@ -315,4 +336,5 @@ Agent 自主完成了：
 | 地点坐标可能被 LLM 编造 | ✅ M4：坐标体检（工具轨迹为权威源） |
 | 记忆只在内存，重启丢失 | ✅ M5：SQLite checkpointer（同一 thread_id 重启后可追问）+ 行程库落盘 |
 | 行程生成后无主动预警（闭馆/雨天/营业时间） | ✅ M5：`/api/trip/check` 体检 + 自动修复 + 前端提示条 |
-| 无埋点统计（turns/latency/cost） | M6 加可观测性 |
+| 无埋点统计（turns/latency/cost） | ✅ M6：`metrics` 表 + `/api/metrics` + 前端「观测」面板 |
+| 无场景回归/评估体系 | ✅ M6：`scenarios/*.yaml` + `run_eval.py` 跑分报告 |

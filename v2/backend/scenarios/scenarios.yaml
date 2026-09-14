@@ -1,0 +1,24 @@
+# 场景回归套件（M6）：每个场景是一次真实请求，跑分脚本 run_eval.py 会逐个执行并出报告。
+# 注意：跑这些会消耗 LLM + 高德配额，且每个场景约 60–120 秒，请手动触发，不要进 CI。
+
+scenarios:
+  - id: normal
+    name: 正常三日游（基线）
+    query: "从上海出发，9月14日到成都玩3天，两个人，总预算3000元，喜欢美食和人文，住经济型酒店"
+    expect:
+      - plan_json  # 应产出结构化行程
+      - optimize   # 应有路线优化结果
+
+  - id: zigzag
+    name: 用户指定乱序（测优化降幅）
+    query: "成都1天，两个人，预算500元。请严格按我说的顺序排：先去春熙路太古里，再去人民公园，然后宽窄巷子，最后去锦里古街和武侯祠"
+    expect:
+      - plan_json
+      - optimize
+
+  - id: tight_budget
+    name: 预算紧张（测 Critic 预算审查）
+    query: "成都2天，1个人，总预算只有400元，喜欢免费景点和街头小吃，住青旅"
+    expect:
+      - plan_json
+      - review  # Critic 应针对预算给出审查意见

@@ -10,12 +10,14 @@ M5 追加：行程落 SQLite + 行程体检（主动感知：闭馆/天气/营�
     GET  /api/trips/{thread_id}     取回某次行程（M5 持久化）
     POST /api/trip/check            行程体检（可自动修复，返回问题清单 + 变更明细）
     POST /api/trip/check/stream     行程体检（SSE，逐条推问题与变更）
+    GET  /api/metrics               埋点汇总统计（M6 可观测）
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
@@ -94,7 +96,7 @@ async def lifespan(app: FastAPI):
     await close_client()
 
 
-app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.3.0-m5", lifespan=lifespan)
+app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.4.0-m6", lifespan=lifespan)
 
 # Critic 审查-修订最大轮数：第 1 轮不通过会修订并复审，第 2 轮结果无论通过与否都放行
 MAX_REVIEW_ROUNDS = 2
@@ -188,6 +190,32 @@ def _collect_steps(msgs: list) -> tuple[str, list[dict[str, Any]]]:
                 }
             )
     return answer, steps
+
+
+def _extract_usage(msgs: list) -> tuple[int, int]:
+    """从消息列表汇总 token 用量（M6 埋点）。返回 (input_tokens, output_tokens)。"""
+    total_in = 0
+    total_out = 0
+    for msg in msgs:
+        if not isinstance(msg, AIMessage):
+            continue
+        um = getattr(msg, "usage_metadata", None) or {}
+        total_in += int(um.get("input_tokens") or 0)
+        total_out += int(um.get("output_tokens") or 0)
+    return total_in, total_out
+
+
+def _count_tool_calls(steps: list[dict[str, Any]]) -> int:
+    """统计 tool_call 步数（不含伪工具，也不含 tool_result）。"""
+    return sum(1 for s in steps if s.get("type") == "tool_call")
+
+
+def _safe_log_metric(**kwargs: Any) -> None:
+    """埋点写库，失败不阻塞主流程。"""
+    try:
+        storage.log_metric(**kwargs)
+    except Exception as exc:  # pragma: no cover - 埋点不应拖垮请求
+        print(f"[metrics] 埋点写入失败：{exc}")
 
 
 async def _run_critic_loop(
@@ -462,6 +490,7 @@ async def _run_trip_check(
 
     返回给接口的 payload；emit 不为 None 时每步实时回调（SSE 用）。
     """
+    t_start = time.perf_counter()
     steps: list[dict[str, Any]] = []
 
     async def push(step: dict[str, Any]) -> None:
@@ -607,6 +636,16 @@ async def _run_trip_check(
             storage.save_trip(thread_id, result["plan_json"], answer=result["answer"])
             storage.add_event(thread_id, "trip_fixed", {"changes": result["changes"]})
 
+    # M6 埋点：体检耗时 / 工具数
+    _safe_log_metric(
+        thread_id=thread_id,
+        kind="trip_check",
+        status="ok",
+        total_ms=int((time.perf_counter() - t_start) * 1000),
+        tool_calls=_count_tool_calls(steps),
+        stages={"inspect": int((time.perf_counter() - t_start) * 1000)},
+    )
+
     result["steps"] = steps
     return result
 
@@ -682,10 +721,22 @@ async def get_trip(thread_id: str) -> dict[str, Any]:
     return saved
 
 
+@app.get("/api/metrics")
+async def metrics(limit: int = 50) -> dict[str, Any]:
+    """M6 可观测：汇总统计 + 最近明细（前端埋点面板用）。"""
+    return {
+        "summary": storage.summary_metrics(),
+        "recent": storage.list_metrics(limit),
+    }
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="message 不能为空")
+    t_start = time.perf_counter()
+    stages: dict[str, int] = {}
+    input_tokens = output_tokens = 0
     try:
         agent = get_agent()
     except RuntimeError as exc:
@@ -697,26 +748,40 @@ async def chat(req: ChatRequest) -> ChatResponse:
             {"messages": [HumanMessage(content=req.message)]}, config=config
         )
     except Exception as exc:  # 让前端拿到可读错误
+        _safe_log_metric(
+            thread_id=req.thread_id, status="error",
+            total_ms=int((time.perf_counter() - t_start) * 1000), stages={"researcher": int((time.perf_counter() - t_start) * 1000)},
+        )
         raise HTTPException(status_code=500, detail=f"Agent 执行失败：{exc}") from exc
 
-    answer, steps = _collect_steps(result.get("messages", []))
+    msgs = result.get("messages", [])
+    input_tokens, output_tokens = _extract_usage(msgs)
+    stages["researcher"] = int((time.perf_counter() - t_start) * 1000)
+
+    answer, steps = _collect_steps(msgs)
     plan_json: dict[str, Any] | None = None
     review: dict[str, Any] | None = None
     optimize: dict[str, Any] | None = None
 
     if answer:
         # Critic 审查 ↔ 修订闭环
+        t = time.perf_counter()
         answer, critic_steps, review = await _run_critic_loop(req.message, answer)
         steps.extend(critic_steps)
+        stages["critic"] = int((time.perf_counter() - t) * 1000)
         # Planner：结构化
+        t = time.perf_counter()
         plan, plan_steps = await _run_planner(req.message, answer)
         steps.extend(plan_steps)
+        stages["planner"] = int((time.perf_counter() - t) * 1000)
         if plan is not None:
             # Optimizer：单日最优排序（M4）；坐标用工具轨迹里的真实值兜底
+            t = time.perf_counter()
             plan, opt_steps, optimize = await _run_optimizer(
                 plan, poi_index=poi_index_from_steps(steps)
             )
             steps.extend(opt_steps)
+            stages["optimizer"] = int((time.perf_counter() - t) * 1000)
             plan_json = plan.model_dump()
             answer = plan.to_markdown()
             # M5：行程落库，重启后仍可体检 / 追问
@@ -724,6 +789,18 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 storage.save_trip(req.thread_id, plan_json, answer=answer, title=plan.title)
             except Exception as exc:
                 print(f"[storage] 行程入库失败（不影响本次响应）：{exc}")
+
+    # M6 埋点：耗时 / 工具数 / token
+    _safe_log_metric(
+        thread_id=req.thread_id,
+        kind="chat",
+        status="ok",
+        total_ms=int((time.perf_counter() - t_start) * 1000),
+        tool_calls=_count_tool_calls(steps),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stages=stages,
+    )
 
     return ChatResponse(
         thread_id=req.thread_id,
@@ -757,6 +834,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         def sse(event: str, data: Any) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+        t_start = time.perf_counter()
+        stages: dict[str, int] = {}
+        input_tokens = output_tokens = 0
+        tool_call_count = 0
+
         yield sse("start", {"thread_id": req.thread_id})
         try:
             seen = 0
@@ -772,7 +854,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 msgs = chunk.get("messages") or []
                 for msg in msgs[seen:]:
                     if isinstance(msg, AIMessage):
+                        um = getattr(msg, "usage_metadata", None) or {}
+                        input_tokens += int(um.get("input_tokens") or 0)
+                        output_tokens += int(um.get("output_tokens") or 0)
                         for call in msg.tool_calls or []:
+                            tool_call_count += 1
                             yield sse(
                                 "step",
                                 {
@@ -800,27 +886,34 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             },
                         )
                 seen = len(msgs)
+            stages["researcher"] = int((time.perf_counter() - t_start) * 1000)
 
             # Critic 审查 ↔ 修订闭环（步数少，收集后统一回放）
             plan_json: dict[str, Any] | None = None
             if answer:
+                t = time.perf_counter()
                 answer, critic_steps, review = await _run_critic_loop(req.message, answer)
                 for s in critic_steps:
                     yield sse("step", s)
+                stages["critic"] = int((time.perf_counter() - t) * 1000)
                 if review is not None:
                     yield sse("review", review)
 
                 # Planner：结构化
+                t = time.perf_counter()
                 plan, plan_steps = await _run_planner(req.message, answer)
                 for s in plan_steps:
                     yield sse("step", s)
+                stages["planner"] = int((time.perf_counter() - t) * 1000)
                 if plan is not None:
                     # Optimizer：单日最优排序（M4）；坐标用工具轨迹里的真实值兜底
+                    t = time.perf_counter()
                     plan, opt_steps, optimize = await _run_optimizer(
                         plan, poi_index=poi_index_from_steps(tool_results)
                     )
                     for s in opt_steps:
                         yield sse("step", s)
+                    stages["optimizer"] = int((time.perf_counter() - t) * 1000)
                     if optimize is not None:
                         yield sse("optimize", optimize)
                     plan_json = plan.model_dump()
@@ -834,9 +927,31 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         print(f"[storage] 行程入库失败（不影响本次响应）：{exc}")
                     yield sse("plan_json", plan_json)
 
+            # M6 埋点
+            _safe_log_metric(
+                thread_id=req.thread_id,
+                kind="chat",
+                status="ok",
+                total_ms=int((time.perf_counter() - t_start) * 1000),
+                tool_calls=tool_call_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                stages=stages,
+            )
+
             yield sse("token", {"content": answer})
             yield sse("done", {"thread_id": req.thread_id})
         except Exception as exc:
+            _safe_log_metric(
+                thread_id=req.thread_id,
+                kind="chat",
+                status="error",
+                total_ms=int((time.perf_counter() - t_start) * 1000),
+                tool_calls=tool_call_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                stages=stages,
+            )
             # 带上异常类型：只给 str(exc) 时，像 NameError 这种空描述在界面上是空白，很难排查
             yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
 

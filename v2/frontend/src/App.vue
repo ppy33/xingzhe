@@ -5,7 +5,8 @@ import ChatPanel from './components/ChatPanel.vue'
 import MapView from './components/MapView.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import AgentTrace from './components/AgentTrace.vue'
-import { chatStream, health, tripCheckStream } from './api/client.js'
+import MetricsPanel from './components/MetricsPanel.vue'
+import { chatStream, health, tripCheckStream, fetchMetrics } from './api/client.js'
 
 // ---------- 状态 ----------
 const messages = ref([])
@@ -28,6 +29,8 @@ const status = ref({ ok: false, model: '' })
 const startedAt = ref(0)
 const finishedAt = ref(0)
 const now = ref(0)
+const metrics = ref({ summary: null, recent: [] })  // M6：埋点观测
+const metricsLoading = ref(false)  // M6：埋点刷新中
 
 let controller = null
 let ticker = null
@@ -187,6 +190,7 @@ async function send(text) {
     clearInterval(ticker)
     ticker = null
     controller = null
+    loadMetrics()  // M6：对话结束刷新观测数据
   }
 }
 
@@ -249,6 +253,19 @@ function stop() {
 
 function pickTab(tab) {
   rightTab.value = tab
+  if (tab === 'metrics') loadMetrics()
+}
+
+// ---------- M6 埋点观测 ----------
+async function loadMetrics() {
+  metricsLoading.value = true
+  try {
+    metrics.value = await fetchMetrics()
+  } catch {
+    metrics.value = { summary: null, recent: [] }
+  } finally {
+    metricsLoading.value = false
+  }
 }
 
 // ---------- Demo 模式 ----------
@@ -650,6 +667,13 @@ onBeforeUnmount(() => {
             Agent 轨迹
             <span v-if="toolCalls" class="tag-num mono">{{ toolCalls }}</span>
           </button>
+          <button
+            class="tab"
+            :class="{ on: rightTab === 'metrics' }"
+            @click="rightTab = 'metrics'"
+          >
+            观测
+          </button>
         </div>
         <div class="tab-body">
           <PlanPanel
@@ -667,6 +691,13 @@ onBeforeUnmount(() => {
             @update:mock-rain="mockRain = $event"
           />
           <AgentTrace v-show="rightTab === 'trace'" :steps="steps" :running="running" />
+          <MetricsPanel
+            v-show="rightTab === 'metrics'"
+            :summary="metrics.summary"
+            :recent="metrics.recent"
+            :loading="metricsLoading"
+            @refresh="loadMetrics"
+          />
         </div>
       </section>
     </main>

@@ -103,3 +103,10 @@ export async function listTrips(limit = 20) {
   if (!res.ok) throw new Error(`trips ${res.status}`)
   return res.json()
 }
+
+/** 埋点汇总统计 + 最近明细（M6 可观测） */
+export async function fetchMetrics(limit = 50) {
+  const res = await fetch(`${BASE}/api/metrics?limit=${limit}`)
+  if (!res.ok) throw new Error(`metrics ${res.status}`)
+  return res.json()
+}
