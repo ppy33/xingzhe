@@ -216,6 +216,28 @@ git config core.hooksPath .githooks
 | `response_format=json_schema` 报不可用 | DeepSeek 限制 | 用 `with_structured_output(..., method="function_calling")` |
 | 一次真实请求要 1–2 分钟 | 单 Agent 串行跑 20+ 次工具 | 正常现象；改 UI 时用 `?demo=1` 模式 |
 | `npm run build` 报 safe-delete 失败 | Windows 删 dist 被拦 | 先 `rm -rf dist` 再 `npm run build` |
+| `git push` 报 `CRYPT_E_NO_REVOCATION_CHECK` 或 `unable to get local issuer certificate` | **加速器在中间人劫持 github.com** | 见下方「GitHub 推不上去」 |
+| `git push` 报 `could not read Username ... terminal prompts disabled` | 本机没缓存 GitHub 凭据 | 在自己终端里直接跑 `git push`，让凭据管理器弹窗登录 |
+
+### GitHub 推不上去：先看证书是谁签的
+
+```bash
+echo | openssl s_client -connect github.com:443 -servername github.com 2>/dev/null | openssl x509 -noout -issuer
+```
+
+- 输出含 **`SteamTools Certificate` / `BeyondDimension`** → 是 **Watt Toolkit（Steam++）之类加速器**在对 GitHub 做 HTTPS 中间人加速。它替换了证书，Git 自带的 CA 包不认，于是校验失败。两种解法：
+
+  **① 关掉加速器的「GitHub 加速」功能（或退出该工具）——推荐**
+  证书恢复成真证书，最干净，而且不用担心账号凭据经过第三方。
+
+  **② 改用读 Windows 证书库的后端**（Windows 证书库里已有它装的根证书）：
+  ```bash
+  git config http.sslBackend schannel
+  git config http.schannelCheckRevoke false   # 该网络下拉不到吊销列表，不关仍会失败
+  ```
+  ⚠️ 这条路等于**你的 GitHub 账号 / Token 会经过那个加速器**（本仓库为跑通推送已采用此配置，介意的话走 ①）。
+
+- 输出是 `CN=*.github.com` 之类正常证书 → 不是劫持问题，去查系统代理设置。
 
 ---
 
