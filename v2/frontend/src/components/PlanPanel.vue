@@ -7,9 +7,36 @@ const props = defineProps({
   planData: { type: Object, default: null },
   review: { type: Object, default: null },
   optimize: { type: Object, default: null },
+  check: { type: Object, default: null },
+  checking: { type: Boolean, default: false },
+  mockRain: { type: Boolean, default: false },
   weather: { type: Array, default: () => [] },
   running: { type: Boolean, default: false },
 })
+
+const emit = defineEmits(['run-check', 'update:mockRain'])
+
+// ---------- M5 行程体检 ----------
+const checkOpen = ref(true)
+const KIND_META = {
+  closure: { icon: '🚪', label: '闭馆' },
+  weather: { icon: '🌧️', label: '天气' },
+  hours: { icon: '⏰', label: '营业时间' },
+}
+function kindMeta(k) { return KIND_META[k] || { icon: '📌', label: k || '其他' } }
+const checkIssues = computed(() => props.check?.inspection?.issues || [])
+const checkChanges = computed(() => props.check?.changes || [])
+/** 变更索引：{日期: Set(下标)}，用于在行程里高亮被改过的项 */
+const changedMap = computed(() => {
+  const map = {}
+  for (const c of checkChanges.value) {
+    ;(map[c.day] ||= []).push(c.item_index)
+  }
+  return map
+})
+function isChanged(date, index) {
+  return (changedMap.value[date] || []).includes(index)
+}
 
 // ---------- M4 优化前后对比 ----------
 const optOpen = ref(true)
@@ -189,6 +216,46 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
         </div>
       </div>
 
+      <!-- M5 行程体检卡（主动感知：闭馆/天气/营业时间巡检 + 自动修复） -->
+      <div
+        v-if="check"
+        class="check"
+        :class="checkIssues.length ? 'check--warn' : 'check--ok'"
+      >
+        <div class="ck-head" @click="checkOpen = !checkOpen">
+          <span class="ck-badge" :class="checkIssues.length ? 'ck-badge--warn' : 'ck-badge--ok'">
+            {{ checkIssues.length ? `🩺 体检发现 ${checkIssues.length} 个问题` : '🩺 体检通过' }}
+          </span>
+          <span v-if="check.fixed" class="ck-fixed">已自动修复 {{ checkChanges.length }} 处</span>
+          <span class="ck-caret" :class="{ open: checkOpen }">›</span>
+        </div>
+        <div v-if="checkOpen" class="ck-body">
+          <p v-if="check.inspection?.summary" class="ck-summary">{{ check.inspection.summary }}</p>
+          <p v-if="Object.keys(check.inspection?.weather || {}).length" class="ck-weather">
+            巡检天气：{{ Object.entries(check.inspection.weather).map(([d, w]) => `${d.slice(5)} ${w}`).join(' · ') }}
+          </p>
+          <ul v-if="checkIssues.length" class="ck-issues">
+            <li v-for="(it, k) in checkIssues" :key="k" class="ck-issue" :data-sev="it.severity">
+              <span class="ck-kind">{{ kindMeta(it.kind).icon }} {{ kindMeta(it.kind).label }}</span>
+              <span class="ck-sev" :data-sev="it.severity">{{ sevLabel(it.severity) }}</span>
+              <span class="ck-desc">{{ it.reason }}</span>
+            </li>
+          </ul>
+          <div v-if="checkChanges.length" class="ck-changes">
+            <div class="ck-changes-title">自动修复明细（行程里已标黄）</div>
+            <ul>
+              <li v-for="(c, k) in checkChanges" :key="k" class="ck-change">
+                <span class="ck-cdate">{{ c.day.slice(5) }} #{{ c.item_index + 1 }}</span>
+                <span class="ck-cflow">
+                  <s>{{ c.before }}</s> <i>→</i> <b>{{ c.after }}</b>
+                  <em v-if="c.added" class="ck-added">新增</em>
+                </span>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       <!-- M4 运筹优化对比卡 -->
       <div v-if="optimize" class="optimize" :class="{ 'optimize--off': !optimize.applied }">
         <div class="op-head" @click="optOpen = !optOpen">
@@ -256,6 +323,20 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
           >📝 Markdown</button>
         </div>
         <div class="spacer" />
+        <label v-if="hasStructured" class="mock-toggle" title="演示用：把首日天气当成中雨，验证自动换成室内项">
+          <input
+            type="checkbox"
+            :checked="mockRain"
+            @change="emit('update:mockRain', $event.target.checked)"
+          />
+          模拟雨天
+        </label>
+        <button
+          v-if="hasStructured"
+          class="tb tb--check"
+          :disabled="checking"
+          @click="emit('run-check')"
+        >{{ checking ? '⏳ 体检中…' : '🩺 行程体检' }}</button>
         <template v-if="view === 'markdown'">
           <button class="tb" @click="copy">复制</button>
           <button class="tb" @click="download">下载 .md</button>
@@ -286,7 +367,12 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
           <p v-if="d.theme" class="sp-day-theme">“{{ d.theme }}”</p>
 
           <ul class="sp-items">
-            <li v-for="(it, j) in d.items" :key="j" class="sp-item">
+            <li
+              v-for="(it, j) in d.items"
+              :key="j"
+              class="sp-item"
+              :class="{ 'sp-item--changed': isChanged(d.date, j) }"
+            >
               <div class="sp-time">{{ it.time }}</div>
               <div class="sp-dot" />
               <div class="sp-card">
@@ -295,6 +381,7 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
                     {{ catIcon(it.place.category) }}
                   </span>
                   <span class="sp-place">{{ it.place?.name || it.title }}</span>
+                  <span v-if="isChanged(d.date, j)" class="sp-changed-tag">体检已调整</span>
                   <span v-if="it.place?.rating" class="sp-rating">{{ fmtRating(it.place) }}</span>
                   <span v-if="fmtCost(it.place)" class="sp-cost mono">{{ fmtCost(it.place) }}</span>
                   <span v-if="fmtDuration(it)" class="sp-dur mono">{{ fmtDuration(it) }}</span>
@@ -626,6 +713,160 @@ const totalBudgetLine = computed(() => budget.value.find((b) => /合计|总计|�
   margin: 0;
   font-size: 11.5px;
   color: var(--muted);
+}
+
+/* ---------- M5 行程体检卡 ---------- */
+.check {
+  margin-bottom: 10px;
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  border-radius: 8px;
+  background: rgba(74, 222, 128, 0.06);
+  overflow: hidden;
+}
+.check--warn {
+  border-color: rgba(251, 146, 60, 0.45);
+  background: rgba(251, 146, 60, 0.07);
+}
+.ck-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.ck-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.ck-badge--ok { background: rgba(74, 222, 128, 0.18); color: #4ade80; }
+.ck-badge--warn { background: rgba(251, 146, 60, 0.18); color: #fb923c; }
+.ck-fixed {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #4ade80;
+}
+.ck-caret {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.18s;
+  font-size: 15px;
+}
+.ck-caret.open { transform: rotate(90deg); }
+.ck-body { padding: 0 11px 10px; }
+.ck-summary {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  color: var(--text-2, #bbb);
+  line-height: 1.65;
+}
+.ck-weather {
+  margin: 0 0 7px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.ck-issues {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ck-issue {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 3px solid #64748b;
+  line-height: 1.6;
+}
+.ck-issue[data-sev='high'] { border-left-color: #f87171; }
+.ck-issue[data-sev='medium'] { border-left-color: #fb923c; }
+.ck-issue[data-sev='low'] { border-left-color: #38bdf8; }
+.ck-kind { color: var(--text-2, #bbb); white-space: nowrap; }
+.ck-sev {
+  font-weight: 600;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--muted);
+}
+.ck-sev[data-sev='high'] { background: rgba(248, 113, 113, 0.18); color: #f87171; }
+.ck-sev[data-sev='medium'] { background: rgba(251, 146, 60, 0.18); color: #fb923c; }
+.ck-sev[data-sev='low'] { background: rgba(56, 189, 248, 0.18); color: #38bdf8; }
+.ck-desc { color: var(--text-2, #bbb); }
+.ck-changes {
+  margin-top: 8px;
+  padding: 8px 9px;
+  border-radius: 6px;
+  background: rgba(74, 222, 128, 0.06);
+  border: 1px dashed rgba(74, 222, 128, 0.35);
+}
+.ck-changes-title {
+  font-size: 10.5px;
+  color: #4ade80;
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+.ck-changes ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ck-change {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  font-size: 11px;
+  align-items: baseline;
+}
+.ck-cdate { color: var(--muted); white-space: nowrap; }
+.ck-cflow s { color: var(--muted); }
+.ck-cflow i { font-style: normal; color: #4ade80; margin: 0 2px; }
+.ck-cflow b { color: #4ade80; font-weight: 600; }
+.ck-added {
+  font-style: normal;
+  font-size: 9.5px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(251, 146, 60, 0.2);
+  color: #fb923c;
+}
+
+/* 被体检调整过的行程项 */
+.sp-item--changed .sp-card {
+  border-left: 3px solid #4ade80;
+  background: rgba(74, 222, 128, 0.05);
+}
+.sp-changed-tag {
+  font-size: 9.5px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(74, 222, 128, 0.18);
+  color: #4ade80;
+  margin-left: 4px;
+}
+
+/* 体检入口 */
+.mock-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  margin-right: 2px;
+}
+.mock-toggle input { accent-color: #38bdf8; }
+.tb--check {
+  border-color: rgba(74, 222, 128, 0.5) !important;
+  color: #4ade80 !important;
 }
 
 .toolbar {

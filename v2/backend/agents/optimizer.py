@@ -89,6 +89,11 @@ def _hhmm_to_min(text: str) -> int | None:
     return h * 60 + mi
 
 
+def hhmm_to_min(text: str) -> int | None:
+    """把 'HH:MM' 文本解析成分钟数（供体检等模块复用）。"""
+    return _hhmm_to_min(text)
+
+
 def min_to_hhmm(minutes: int) -> str:
     minutes = max(0, min(int(minutes), 23 * 60 + 59))
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
@@ -205,6 +210,11 @@ def parse_loc(loc: str) -> tuple[float, float] | None:
     if lng == 0 and lat == 0:
         return None
     return (lng, lat)
+
+
+async def regeo_city(loc: str) -> str:
+    """逆地理编码拿城市名（公开版本，供体检等模块复用）。失败返回空串。"""
+    return await _regeo_city(loc)
 
 
 async def _regeo_city(loc: str) -> str:
@@ -781,9 +791,11 @@ __all__ = [
     "parse_open_window",
     "parse_loc",
     "repair_coordinates",
+    "regeo_city",
     "poi_index_from_steps",
     "lookup_poi_index",
     "guess_city",
+    "hhmm_to_min",
     "min_to_hhmm",
     "DAY_START_MIN",
     "DAY_END_MIN",

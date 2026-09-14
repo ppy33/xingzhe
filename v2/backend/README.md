@@ -1,7 +1,7 @@
-# 行者 v2 · 后端（M1）
+# 行者 v2 · 后端（M5）
 
-「行者 · 智能旅游助手」的生产化版本。M1 目标：跑通
-**用户自然语言 → LLM 选工具 → 调真实高德数据 → 汇总成可执行行程** 这条完整链路。
+「行者 · 智能旅游助手」的生产化版本。当前已跑通
+**自然语言 → 多 Agent 调研/审查/结构化 → 运筹优化 → 主动感知体检** 全链路。
 
 ---
 
@@ -171,6 +171,20 @@ Optimizer（OR-Tools VRPTW 单日最优排序 + 坐标体检，M4）
 Markdown + plan_json + review + optimize 四路输出
 ```
 
+行程生成后，还可对结果做 **M5 主动感知体检**（独立接口，不塞进主链）：
+
+```
+POST /api/trip/check（或 /stream）
+   ↓
+查天气（可 mock）→ 规则巡检（闭馆/雨天户外/营业时间越界）
+   ↓ 有 issue 且 auto_fix
+自动修复（雨天换室内、闭馆日调整，新增地点带审计标记）
+   ↓ reoptimize
+重跑路线优化
+   ↓
+inspection + changes + plan_json + optimize 输出
+```
+
 ### 抗幻觉：修订内容的地点白名单
 
 Reviser 只允许「调序 / 删减 / 重分配时间」，不允许引入初版没有的 POI。
@@ -246,6 +260,33 @@ plan_json（前端地图）+ 距离矩阵（优化器）
 
 ---
 
+## M5 主动感知（行程体检）
+
+行程生成后，用**规则巡检**主动发现「闭馆 / 雨天户外 / 营业时间越界」三类问题，
+可选自动修复并重排路线。核心在 `agents/inspector.py`，数据落 `storage.py`（SQLite）。
+
+### 巡检规则（程序化，不靠提示词）
+
+- **闭馆**：`monday_closed_risk()` 匹配「周一闭馆」类地点的营业文案，命中周一则报 issue
+- **天气冲突**：`is_rainy()` 判断雨天，雨天撞上 `sight` 且无室内属性的项 → 建议换室内
+- **营业时间越界**：`parse_open_window()` 解析营业时间窗，比对 `DayItem.time` 是否落在门外
+
+### 自动修复（fixer Agent）
+
+命中 issue 时，调 `fix_trip()`：flash 模型 + 结构化输出，按问题清单修订 TripPlan；
+雨天户外项会从 `fetch_indoor_candidates()` 拿高德检索的**室内候选点**替换。
+修复产生的差异用 `diff_plans()` 生成 `PlanChange[]`（`before/after/reason/added`），
+前端据此高亮；`added=true` 的新地点带审计标记（未经工具核实）。
+
+### 踩坑（M5 新增）
+
+- fixer 也犯过 Planner 的「不调工具直接回自然语言」老毛病 → 同样加显式校验 + 重试
+- 城市推断失灵：行程 `address` 常为空，`guess_city()` 推不出城市 →
+  新增 `infer_city()`，用 POI 坐标反查城市（`regeo`）兜底
+- 天气接口失败不致命：`weather` 置空，跳过天气维度，体检照常出闭馆/营业时间问题
+
+---
+
 ## 已验证效果
 
 输入：`从上海出发，9月14日到成都玩3天，两个人，总预算3000元，喜欢美食和人文，住经济型酒店`
@@ -272,5 +313,6 @@ Agent 自主完成了：
 | 没有 Critic 审查（行程合理性/疲劳度） | ✅ M3：Critic ↔ Reviser 闭环 + 前端审查卡 |
 | 单日顺序靠 LLM 拍脑袋 | ✅ M4：OR-Tools VRPTW 最优排序 + 前后对比 |
 | 地点坐标可能被 LLM 编造 | ✅ M4：坐标体检（工具轨迹为权威源） |
-| 记忆只在内存，重启丢失 | M5 换 SQLite checkpointer |
+| 记忆只在内存，重启丢失 | ✅ M5：SQLite checkpointer（同一 thread_id 重启后可追问）+ 行程库落盘 |
+| 行程生成后无主动预警（闭馆/雨天/营业时间） | ✅ M5：`/api/trip/check` 体检 + 自动修复 + 前端提示条 |
 | 无埋点统计（turns/latency/cost） | M6 加可观测性 |

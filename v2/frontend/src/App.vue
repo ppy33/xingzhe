@@ -5,7 +5,7 @@ import ChatPanel from './components/ChatPanel.vue'
 import MapView from './components/MapView.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import AgentTrace from './components/AgentTrace.vue'
-import { chatStream, health } from './api/client.js'
+import { chatStream, health, tripCheckStream } from './api/client.js'
 
 // ---------- 状态 ----------
 const messages = ref([])
@@ -17,6 +17,9 @@ const plan = ref('')
 const planData = ref(null)  // M3 结构化行程（TripPlan JSON）
 const reviewData = ref(null)  // M3 打磨：Critic 审查报告
 const optimizeData = ref(null)  // M4：VRPTW 优化前后对比
+const checkData = ref(null)  // M5：行程体检结果（问题 + 变更明细）
+const checking = ref(false)  // M5：体检进行中
+const mockRain = ref(false)  // M5：演示用「模拟雨天」开关
 const threadId = ref('')
 const running = ref(false)
 const activeId = ref('')
@@ -122,6 +125,7 @@ async function send(text) {
   planData.value = null
   reviewData.value = null
   optimizeData.value = null
+  checkData.value = null
   weather.value = []
   routes.value = []
 
@@ -186,9 +190,52 @@ async function send(text) {
   }
 }
 
+// ---------- M5 行程体检 ----------
+/**
+ * 行程体检：调后端巡检闭馆 / 天气 / 营业时间，必要时自动改行程。
+ * 结果通过 checkData 传给 PlanPanel（问题提示条 + 变更高亮）。
+ */
+async function runTripCheck() {
+  if (!planData.value || checking.value) return
+  checking.value = true
+  checkData.value = null
+  const mockWeather = mockRain.value
+    ? { [(planData.value.days?.[0]?.date) || '']: '中雨/小雨' }
+    : null
+  try {
+    await tripCheckStream(
+      {
+        // demo 模式不落库（threadId 是假的），真实会话才带 thread_id
+        thread_id: threadId.value === 'demo-thread' ? '' : threadId.value || '',
+        plan_json: planData.value,
+        auto_fix: true,
+        reoptimize: true,
+        mock_weather: mockWeather,
+      },
+      (event, data) => {
+        if (event === 'step') {
+          pushStep(data)
+        } else if (event === 'trip_update') {
+          checkData.value = data
+        } else if (event === 'plan_json') {
+          planData.value = data
+        } else if (event === 'optimize') {
+          optimizeData.value = data
+        } else if (event === 'error') {
+          throw new Error(data.message)
+        }
+      }
+    )
+  } catch (e) {
+    const msg = e?.name === 'AbortError' ? '体检已取消。' : `体检失败：${e.message}`
+    messages.value.push({ role: 'ai', content: msg })
+  } finally {
+    checking.value = false
+  }
+}
+
 /** 从行程 Markdown 里摘一句概览，用于对话气泡 */
-function briefOf(md) {
-  const lines = md
+function briefOf(md) {  const lines = md
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#') && !l.startsWith('|') && !l.startsWith('>'))
@@ -611,8 +658,13 @@ onBeforeUnmount(() => {
             :plan-data="planData"
             :review="reviewData"
             :optimize="optimizeData"
+            :check="checkData"
+            :checking="checking"
+            :mock-rain="mockRain"
             :weather="weather"
             :running="running"
+            @run-check="runTripCheck"
+            @update:mock-rain="mockRain = $event"
           />
           <AgentTrace v-show="rightTab === 'trace'" :steps="steps" :running="running" />
         </div>

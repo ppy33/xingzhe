@@ -59,6 +59,9 @@ const TOOL_LABEL = {
   revise_plan: '行程修订',
   planner_struct: '结构化规划',
   optimizer_route: '路线优化',
+  insp_weather: '巡检天气',
+  insp_rules: '巡检规则',
+  insp_fix: '自动修复',
 }
 
 function label(tool) {

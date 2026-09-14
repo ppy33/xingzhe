@@ -25,19 +25,9 @@ export async function chat(message, threadId) {
 }
 
 /**
- * SSE 流式对话
- * @param {string} message
- * @param {string|undefined} threadId
- * @param {(event: string, data: any) => void} onEvent
- * @param {AbortSignal} [signal]
+ * 通用 SSE 读取：把响应体按事件回调出去（chat/stream 与 trip/check/stream 共用）
  */
-export async function chatStream(message, threadId, onEvent, signal) {
-  const res = await fetch(`${BASE}/api/chat/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, thread_id: threadId }),
-    signal,
-  })
+async function readSSE(res, onEvent) {
   if (!res.ok || !res.body) {
     const detail = await res.json().catch(() => ({}))
     throw new Error(detail.detail || `请求失败 ${res.status}`)
@@ -72,4 +62,44 @@ export async function chatStream(message, threadId, onEvent, signal) {
       }
     }
   }
+}
+
+/**
+ * SSE 流式对话
+ * @param {string} message
+ * @param {string|undefined} threadId
+ * @param {(event: string, data: any) => void} onEvent
+ * @param {AbortSignal} [signal]
+ */
+export async function chatStream(message, threadId, onEvent, signal) {
+  const res = await fetch(`${BASE}/api/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, thread_id: threadId }),
+    signal,
+  })
+  return readSSE(res, onEvent)
+}
+
+/**
+ * 行程体检（SSE）
+ * @param {{thread_id?: string, plan_json?: object, auto_fix?: boolean, reoptimize?: boolean, mock_weather?: object|null}} payload
+ * @param {(event: string, data: any) => void} onEvent
+ * @param {AbortSignal} [signal]
+ */
+export async function tripCheckStream(payload, onEvent, signal) {
+  const res = await fetch(`${BASE}/api/trip/check/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  })
+  return readSSE(res, onEvent)
+}
+
+/** 历史行程列表（M5 持久化） */
+export async function listTrips(limit = 20) {
+  const res = await fetch(`${BASE}/api/trips?limit=${limit}`)
+  if (!res.ok) throw new Error(`trips ${res.status}`)
+  return res.json()
 }

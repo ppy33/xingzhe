@@ -71,6 +71,10 @@ jobs:
         working-directory: v2/backend
         run: python test_optimizer.py
 
+      - name: 离线回归（体检器：规则巡检 + 修复 diff，不联网）
+        working-directory: v2/backend
+        run: python test_inspector.py
+
   frontend:
     name: 前端构建
     runs-on: ubuntu-latest

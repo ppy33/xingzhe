@@ -27,6 +27,13 @@ v2_logs/
 docs/resp*.json
 docs/sse_*.txt
 
+# ========== 运行期数据（M5 SQLite）==========
+# 行程库、对话记忆库都是运行时数据，不进仓库
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # ========== IDE / 系统 ==========
 .idea/
 .vscode/

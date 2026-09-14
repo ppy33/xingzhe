@@ -38,6 +38,10 @@ class Settings:
     http_timeout: float = float(os.getenv("HTTP_TIMEOUT", "15"))
     max_agent_steps: int = int(os.getenv("MAX_AGENT_STEPS", "25"))
 
+    # ---- 持久化（M5）----
+    # SQLite 文件路径（相对 backend 目录）。行程与 Agent 对话记忆都落这里
+    db_path: str = os.getenv("DB_PATH", "data/xingzhe.db").strip()
+
     def require_amap(self) -> str:
         if not self.amap_server_key:
             raise RuntimeError(

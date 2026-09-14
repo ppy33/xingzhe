@@ -1,10 +1,15 @@
 """行者 v2 · FastAPI 服务入口
 
-M3 深入主流程：Researcher（调研）→ Critic（审查↔修订闭环）→ Planner（结构化）。
+主流程：Researcher（调研）→ Critic（审查↔修订闭环）→ Planner（结构化）→ Optimizer（路线优化）。
+M5 追加：行程落 SQLite + 行程体检（主动感知：闭馆/天气/营业时间巡检 + 自动修复）。
 
-    GET  /health              健康检查 + 密钥配置状态
-    POST /api/chat            单轮对话（返回完整结果，含 plan_json）
-    POST /api/chat/stream     SSE 流式输出（含工具调用过程，前端 Step 面板用）
+    GET  /health                    健康检查 + 密钥配置状态
+    POST /api/chat                  单轮对话（返回完整结果，含 plan_json）
+    POST /api/chat/stream           SSE 流式输出（含工具调用过程，前端 Step 面板用）
+    GET  /api/trips                 历史行程列表（M5 持久化）
+    GET  /api/trips/{thread_id}     取回某次行程（M5 持久化）
+    POST /api/trip/check            行程体检（可自动修复，返回问题清单 + 变更明细）
+    POST /api/trip/check/stream     行程体检（SSE，逐条推问题与变更）
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import json
 import os
 import sys
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,14 +28,22 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+import storage  # noqa: E402
 from agents import (  # noqa: E402
     TripPlan,
     build_critic,
+    build_fixer,
     build_planner,
     build_researcher,
     build_reviser,
     build_whitelist_checker,
     check_new_places,
+    diff_plans,
+    fetch_indoor_candidates,
+    fetch_weather,
+    fix_trip,
+    infer_city,
+    inspect_trip,
     optimize_plan,
     plan_to_struct,
     poi_index_from_steps,
@@ -40,7 +54,47 @@ from agents import (  # noqa: E402
 from config import settings  # noqa: E402
 from tools import close_client  # noqa: E402
 
-app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.2.0-m4")
+_agent = None
+_critic = None
+_reviser = None
+_planner = None
+_whitelist = None
+_fixer = None
+_saver_cm = None  # AsyncSqliteSaver 的上下文管理器，需在 lifespan 里持有
+_checkpointer = None
+
+
+def get_agent():
+    global _agent
+    if _agent is None:
+        _agent = build_researcher(checkpointer=_checkpointer)
+    return _agent
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动时初始化 SQLite（行程库 + Agent 对话记忆），关闭时释放。"""
+    global _checkpointer, _saver_cm
+    path = storage.init_db(settings.db_path)
+    print(f"[storage] 行程库就绪：{path}")
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        _saver_cm = AsyncSqliteSaver.from_conn_string(str(path))
+        _checkpointer = await _saver_cm.__aenter__()
+        print("[storage] Agent 对话记忆已切到 SQLite（重启后同一 thread_id 可继续追问）")
+    except Exception as exc:  # 退化到内存，不影响主流程
+        print(f"[storage] SQLite checkpointer 不可用，回退内存：{exc}")
+        _checkpointer = None
+    yield
+    if _saver_cm is not None:
+        await _saver_cm.__aexit__(None, None, None)
+        _saver_cm = None
+    storage.close_db()
+    await close_client()
+
+
+app = FastAPI(title="行者 v2 · 智能旅游助手", version="2.3.0-m5", lifespan=lifespan)
 
 # Critic 审查-修订最大轮数：第 1 轮不通过会修订并复审，第 2 轮结果无论通过与否都放行
 MAX_REVIEW_ROUNDS = 2
@@ -53,20 +107,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_agent = None
-_critic = None
-_reviser = None
-_planner = None
-_whitelist = None
-
-
-def get_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_researcher()
-    return _agent
-
 
 def get_critic():
     global _critic
@@ -94,6 +134,13 @@ def get_whitelist():
     if _whitelist is None:
         _whitelist = build_whitelist_checker()
     return _whitelist
+
+
+def get_fixer():
+    global _fixer
+    if _fixer is None:
+        _fixer = build_fixer()
+    return _fixer
 
 
 class ChatRequest(BaseModel):
@@ -366,6 +413,275 @@ async def _run_optimizer(
     return plan, steps, stat
 
 
+# --------------------------------------------------------------------------
+# M5 行程体检（主动感知）
+# --------------------------------------------------------------------------
+class TripCheckRequest(BaseModel):
+    thread_id: str = Field(default="", description="要体检的行程 ID（与 /api/chat 的一致）")
+    plan_json: dict[str, Any] | None = Field(
+        default=None, description="也可以直接传一份行程，做无状态体检"
+    )
+    auto_fix: bool = Field(default=True, description="发现问题后是否自动修复")
+    reoptimize: bool = Field(default=True, description="修复后是否重跑路线优化")
+    mock_weather: dict[str, str] | None = Field(
+        default=None,
+        description="演示/测试用：{日期: 天气}，给定时覆盖真实天气（例如 {'2026-09-15': '中雨'}）",
+    )
+    save: bool = Field(default=True, description="是否把修复结果写回行程库")
+
+
+class TripCheckResponse(BaseModel):
+    thread_id: str
+    inspection: dict[str, Any]
+    changes: list[dict[str, Any]] = []
+    plan_json: dict[str, Any] | None = None
+    answer: str = ""
+    optimize: dict[str, Any] | None = None
+    fixed: bool = False
+
+
+def _load_plan_for_check(req: TripCheckRequest) -> tuple[str, TripPlan]:
+    """取要体检的行程：优先用请求里的 plan_json，否则按 thread_id 从库里取。"""
+    if req.plan_json:
+        return req.thread_id or "adhoc", TripPlan.model_validate(req.plan_json)
+    if not req.thread_id:
+        raise HTTPException(status_code=400, detail="需要 thread_id 或 plan_json 之一")
+    saved = storage.get_trip(req.thread_id)
+    if saved is None:
+        raise HTTPException(
+            status_code=404, detail=f"没找到 thread_id={req.thread_id} 的行程，请先生成行程"
+        )
+    return req.thread_id, TripPlan.model_validate(saved["plan"])
+
+
+async def _run_trip_check(
+    req: TripCheckRequest,
+    emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> dict[str, Any]:
+    """体检核心：取行程 → 查天气 → 规则巡检 → （可选）自动修复 → （可选）重优化 → 存档。
+
+    返回给接口的 payload；emit 不为 None 时每步实时回调（SSE 用）。
+    """
+    steps: list[dict[str, Any]] = []
+
+    async def push(step: dict[str, Any]) -> None:
+        steps.append(step)
+        if emit is not None:
+            await emit(step)
+
+    thread_id, plan = _load_plan_for_check(req)
+
+    # 1) 天气
+    city = await infer_city(plan)
+    await push(
+        {
+            "type": "tool_call",
+            "tool": "insp_weather",
+            "args": {"city": city or "（未知）", "mock": bool(req.mock_weather)},
+        }
+    )
+    if req.mock_weather:
+        weather = dict(req.mock_weather)
+        note = "（演示用模拟天气）"
+    else:
+        weather = await fetch_weather(city)
+        note = ""
+    await push(
+        {
+            "type": "tool_result",
+            "tool": "insp_weather",
+            "content": json.dumps(
+                {"city": city, "days": len(weather), "note": note, "weather": weather},
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    # 2) 规则巡检
+    await push(
+        {
+            "type": "tool_call",
+            "tool": "insp_rules",
+            "args": {"checks": "closure,weather,hours"},
+        }
+    )
+    inspection = inspect_trip(plan, weather)
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for i in inspection.issues:
+        counts[i.severity] = counts.get(i.severity, 0) + 1
+    await push(
+        {
+            "type": "tool_result",
+            "tool": "insp_rules",
+            "content": json.dumps(
+                {
+                    "issue_count": len(inspection.issues),
+                    "high": counts["high"],
+                    "medium": counts["medium"],
+                    "low": counts["low"],
+                    "summary": inspection.summary,
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    result: dict[str, Any] = {
+        "thread_id": thread_id,
+        "inspection": inspection.model_dump(),
+        "changes": [],
+        "plan_json": plan.model_dump(),
+        "answer": plan.to_markdown(),
+        "optimize": None,
+        "fixed": False,
+    }
+
+    # 3) 自动修复
+    if req.auto_fix and inspection.issues:
+        await push(
+            {
+                "type": "tool_call",
+                "tool": "insp_fix",
+                "args": {"issues": len(inspection.issues), "auto": True},
+            }
+        )
+        try:
+            candidates: list[dict[str, Any]] = []
+            if any(i.kind == "weather" for i in inspection.issues):
+                candidates = await fetch_indoor_candidates(city)
+            fixed_plan = await fix_trip(get_fixer(), plan, inspection, candidates)
+            changes = diff_plans(plan, fixed_plan, inspection)
+            plan = fixed_plan
+            result.update(
+                {
+                    "plan_json": plan.model_dump(),
+                    "answer": plan.to_markdown(),
+                    "changes": [c.model_dump() for c in changes],
+                    "fixed": bool(changes),
+                }
+            )
+            await push(
+                {
+                    "type": "tool_result",
+                    "tool": "insp_fix",
+                    "content": json.dumps(
+                        {
+                            "changes": len(changes),
+                            "added_places": len([c for c in changes if c.added]),
+                            "candidates": len(candidates),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+        except Exception as exc:
+            await push(
+                {
+                    "type": "tool_result",
+                    "tool": "insp_fix",
+                    "content": json.dumps({"error": str(exc)[:200]}, ensure_ascii=False),
+                }
+            )
+
+        # 4) 修复后重跑路线优化
+        if result["fixed"] and req.reoptimize:
+            plan, opt_steps, optimize = await _run_optimizer(plan)
+            for s in opt_steps:
+                await push(s)
+            result["plan_json"] = plan.model_dump()
+            result["answer"] = plan.to_markdown()
+            result["optimize"] = optimize
+
+    # 5) 存档 + 事件（无 thread_id 的临时行程不落库）
+    if req.save and thread_id and thread_id != "adhoc":
+        storage.add_event(
+            thread_id,
+            "trip_check",
+            {
+                "issues": len(inspection.issues),
+                "changes": len(result["changes"]),
+                "fixed": result["fixed"],
+            },
+        )
+        if result["fixed"]:
+            storage.save_trip(thread_id, result["plan_json"], answer=result["answer"])
+            storage.add_event(thread_id, "trip_fixed", {"changes": result["changes"]})
+
+    result["steps"] = steps
+    return result
+
+
+@app.post("/api/trip/check", response_model=TripCheckResponse)
+async def trip_check(req: TripCheckRequest) -> TripCheckResponse:
+    """行程体检：巡检闭馆/天气/营业时间，可自动修复并重排路线。"""
+    data = await _run_trip_check(req)
+    return TripCheckResponse(**{k: v for k, v in data.items() if k != "steps"})
+
+
+@app.post("/api/trip/check/stream")
+async def trip_check_stream(req: TripCheckRequest) -> StreamingResponse:
+    """行程体检（SSE）：逐条推问题与变更，前端可边收边高亮。
+
+    事件：check_start → step×N → issue×N → trip_update → plan_json → optimize? → done
+    """
+    async def event_gen():
+        def sse(event: str, data: Any) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        yield sse("check_start", {"thread_id": req.thread_id, "auto_fix": req.auto_fix})
+        try:
+            queue: list[dict[str, Any]] = []
+
+            async def emit(step: dict[str, Any]) -> None:
+                queue.append(step)
+
+            data = await _run_trip_check(req, emit=emit)
+            for step in data.pop("steps", []):
+                yield sse("step", step)
+            for issue in data["inspection"]["issues"]:
+                yield sse("issue", issue)
+            yield sse(
+                "trip_update",
+                {
+                    "thread_id": data["thread_id"],
+                    "inspection": data["inspection"],
+                    "changes": data["changes"],
+                    "fixed": data["fixed"],
+                },
+            )
+            if data.get("plan_json"):
+                yield sse("plan_json", data["plan_json"])
+            if data.get("optimize"):
+                yield sse("optimize", data["optimize"])
+            yield sse("done", {"thread_id": data["thread_id"]})
+        except HTTPException as exc:
+            yield sse("error", {"message": exc.detail})
+        except Exception as exc:
+            yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/trips")
+async def list_trips(limit: int = 20) -> dict[str, Any]:
+    """历史行程列表（M5 持久化：重启后仍可查）。"""
+    return {"trips": storage.list_trips(limit)}
+
+
+@app.get("/api/trips/{thread_id}")
+async def get_trip(thread_id: str) -> dict[str, Any]:
+    """取回某次行程（含修复历史事件）。"""
+    saved = storage.get_trip(thread_id)
+    if saved is None:
+        raise HTTPException(status_code=404, detail=f"没找到 thread_id={thread_id}")
+    saved["events"] = storage.list_events(thread_id)
+    return saved
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
@@ -403,6 +719,11 @@ async def chat(req: ChatRequest) -> ChatResponse:
             steps.extend(opt_steps)
             plan_json = plan.model_dump()
             answer = plan.to_markdown()
+            # M5：行程落库，重启后仍可体检 / 追问
+            try:
+                storage.save_trip(req.thread_id, plan_json, answer=answer, title=plan.title)
+            except Exception as exc:
+                print(f"[storage] 行程入库失败（不影响本次响应）：{exc}")
 
     return ChatResponse(
         thread_id=req.thread_id,
@@ -504,6 +825,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         yield sse("optimize", optimize)
                     plan_json = plan.model_dump()
                     answer = plan.to_markdown()
+                    # M5：行程落库（失败不影响本次响应）
+                    try:
+                        storage.save_trip(
+                            req.thread_id, plan_json, answer=answer, title=plan.title
+                        )
+                    except Exception as exc:
+                        print(f"[storage] 行程入库失败（不影响本次响应）：{exc}")
                     yield sse("plan_json", plan_json)
 
             yield sse("token", {"content": answer})
@@ -517,8 +845,3 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    await close_client()

@@ -80,6 +80,48 @@ class WhitelistCheck(BaseModel):
     )
 
 
+class TripIssue(BaseModel):
+    """行程体检发现的一个问题（M5）。"""
+
+    day: str = Field(default="", description="受影响的日期 YYYY-MM-DD；全天性问题留空")
+    item_index: Optional[int] = Field(
+        default=None, description="受影响项在该天 items 里的下标；不针对具体项时留空"
+    )
+    kind: str = Field(
+        ...,
+        description="问题类型：closure（闭馆）/ weather（天气冲突）/ hours（营业时间越界）",
+    )
+    severity: str = Field(default="medium", description="严重程度：low/medium/high")
+    reason: str = Field(..., description="问题描述")
+    suggestion: str = Field(default="", description="建议的修法")
+
+
+class TripInspection(BaseModel):
+    """行程体检报告（M5）。"""
+
+    issues: list[TripIssue] = Field(default_factory=list)
+    weather: dict[str, str] = Field(
+        default_factory=dict, description="日期 → 天气原文，体检依据"
+    )
+    checked_at: str = Field(default="", description="体检时间（本地时区 ISO）")
+    summary: str = Field(default="", description="一句话总评")
+
+    @property
+    def passed(self) -> bool:
+        return not self.issues
+
+
+class PlanChange(BaseModel):
+    """体检自动修复产生的一处变更（前端据此高亮）。"""
+
+    day: str = Field(..., description="发生变更的日期")
+    item_index: int = Field(..., description="变更项在该天 items 里的下标")
+    before: str = Field(default="", description="原来的安排")
+    after: str = Field(default="", description="调整后的安排")
+    reason: str = Field(default="", description="为什么改")
+    added: bool = Field(default=False, description="是否为体检新增的地点（需审计）")
+
+
 class TripPlan(BaseModel):
     """完整行程结构化对象。"""
 

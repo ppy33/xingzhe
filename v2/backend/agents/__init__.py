@@ -8,10 +8,27 @@ from agents.critic import (
     review_report,
     revise_plan,
 )
-from agents.optimizer import optimize_plan, poi_index_from_steps
+from agents.inspector import (
+    build_fixer,
+    diff_plans,
+    fetch_indoor_candidates,
+    fetch_weather,
+    fix_trip,
+    infer_city,
+    inspect_trip,
+)
+from agents.optimizer import guess_city, optimize_plan, poi_index_from_steps
 from agents.planner import build_planner, plan_to_struct
 from agents.researcher import build_researcher
-from agents.schemas import ReviewIssue, ReviewReport, TripPlan, WhitelistCheck
+from agents.schemas import (
+    PlanChange,
+    ReviewIssue,
+    ReviewReport,
+    TripInspection,
+    TripIssue,
+    TripPlan,
+    WhitelistCheck,
+)
 
 __all__ = [
     "build_researcher",
@@ -26,8 +43,19 @@ __all__ = [
     "plan_to_struct",
     "optimize_plan",
     "poi_index_from_steps",
+    "guess_city",
+    "inspect_trip",
+    "fix_trip",
+    "diff_plans",
+    "fetch_weather",
+    "fetch_indoor_candidates",
+    "infer_city",
+    "build_fixer",
     "TripPlan",
     "ReviewReport",
     "ReviewIssue",
     "WhitelistCheck",
+    "TripInspection",
+    "TripIssue",
+    "PlanChange",
 ]

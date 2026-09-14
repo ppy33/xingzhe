@@ -70,12 +70,14 @@ SYSTEM_PROMPT = """你是「行者」，一个专业的中文旅游行程规划�
 """
 
 
-def build_researcher(model: str | None = None, temperature: float = 0.3):
+def build_researcher(model: str | None = None, temperature: float = 0.3, checkpointer=None):
     """构建 Researcher Agent。
 
     Args:
         model: 模型名，默认取 settings.deepseek_model。
         temperature: 规划类任务用低温度，保证结果稳定。
+        checkpointer: 会话记忆后端。传 None 用内存（重启丢），
+            M5 会传 AsyncSqliteSaver 让同一 thread_id 在重启后仍能继续追问。
     """
     settings.require_llm()
     llm = ChatOpenAI(
@@ -90,5 +92,5 @@ def build_researcher(model: str | None = None, temperature: float = 0.3):
         model=llm,
         tools=AMAP_TOOLS,
         prompt=SystemMessage(content=SYSTEM_PROMPT),
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
     )
